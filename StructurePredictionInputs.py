@@ -13,8 +13,9 @@ Why a Pydantic *dataclass* instead of a `BaseModel`?
 Run directly to see validation + methods in action:
     python StructurePredictionInputs.py
 """
-import os
 from __future__ import annotations
+
+import os
 
 from enum import Enum
 from typing import Optional
