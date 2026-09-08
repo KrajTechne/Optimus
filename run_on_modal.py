@@ -114,6 +114,7 @@ boltz2_image = (
         # gemmi also comes in transitively via boltz, but pin it explicitly to not rely on that.
         "gemmi",
         "biotite",
+        "ipsae",  # provides the `ipsae` CLI that StrucTools.calculate_ipSAE shells out to
     )
     .add_local_python_source(*_SHARED_LOCAL_MODULES, "RunBoltz2")
 )
@@ -136,6 +137,9 @@ def run_boltz2() -> list[dict]:
         msa_options=["empty", ""],
         entity_types=["protein", "protein"],
         ligand_list = ['[Mg+2]'],
+        # cuequivariance_ops_torch (the compiled kernels use_kernels=True needs)
+        # isn't installed — disable kernels rather than chase that dependency.
+        use_kernels=False,
         path_output_dir=f"{OUTPUTS_MOUNT}/example_boltz2_design",
     )
     df_metrics = design.boltz_predict_analyze()
