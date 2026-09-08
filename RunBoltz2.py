@@ -159,7 +159,10 @@ class RunBoltz2(StructurePredictionInputs):
         metrics = {"design_id" : f"{self.design_name}_{model_id}", "design_name": self.design_name, "model_id": model_id}
     
         # 1. Load the structure & path to Boltz2 structure confidence metrics along with pae_matrix path for ipsae calculations
-        path_structure = f"{self.path_output_dir}/{self.design_name}/predictions/{self.design_name}/{self.design_name}_model_{model_id}.cif"
+        # Boltz's actual output layout (confirmed via a real run, boltz_results_{design_name}
+        # sits directly under path_output_dir — no extra {design_name}/ nesting above it):
+        # {path_output_dir}/boltz_results_{design_name}/predictions/{design_name}/...
+        path_structure = f"{self.path_output_dir}/boltz_results_{self.design_name}/predictions/{self.design_name}/{self.design_name}_model_{model_id}.cif"
         path_predictions = "/".join(path_structure.split('/')[:-1])
         path_confidence = path_predictions + f"/confidence_{self.design_name}_model_{model_id}.json"
         path_pae = path_predictions + f"/pae_{self.design_name}_model_{model_id}.npz"
@@ -199,7 +202,7 @@ class RunBoltz2(StructurePredictionInputs):
     
         # Convert to DataFrame and save as csv
         df_design_metrics = pd.DataFrame(metrics_design)
-        df_design_metrics.to_csv(f"{self.path_output_dir}/{self.design_name}/predictions/{self.design_name}/all_models_metrics.csv", index=False)
+        df_design_metrics.to_csv(f"{self.path_output_dir}/boltz_results_{self.design_name}/predictions/{self.design_name}/all_models_metrics.csv", index=False)
     
         return df_design_metrics
 
