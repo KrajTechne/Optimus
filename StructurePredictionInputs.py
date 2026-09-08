@@ -1,58 +1,16 @@
 """
-StructurePredictionInputs — a worked example of a Pydantic dataclass.
-
-Why a Pydantic *dataclass* instead of a `BaseModel`?
-- You want the familiar `@dataclass` shape (plain attributes, auto __init__,
-  auto __repr__) but with Pydantic's validation/coercion layered on top.
-- It stays interoperable with the stdlib `dataclasses` module — things like
-  `dataclasses.fields(...)` and `dataclasses.asdict(...)` still work.
-- Past __init__, it behaves like any normal Python class: you add methods,
-  properties, and classmethods exactly as you would on a plain dataclass.
-  Pydantic only intercepts construction to validate/coerce inputs.
-
-Run directly to see validation + methods in action:
-    python StructurePredictionInputs.py
+StructurePredictionInputs: 
+    Collects & Validates inputs for structure prediction models, including sequences, templates, MSA options, entity types, ligands, and output directory
+    Provides methods to analyze predicted structures of complexes for binding interfaces and ipSAE metrics.
 """
 from __future__ import annotations
 
 import os
 
-from enum import Enum
-from typing import Optional
-
+from typing import Literal
 from pydantic import Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
-
-
-class ChainType(str, Enum):
-    PROTEIN = "protein"
-    DNA = "dna"
-    RNA = "rna"
-    LIGAND = "ligand"
-
-
-@dataclass
-class ChainInput:
-    """One entity to fold — e.g. a binder chain, a target chain, or a ligand."""
-
-    chain_id: str
-    sequence: str
-    chain_type: ChainType = ChainType.PROTEIN
-
-    # A field_validator runs whenever `sequence` is set during construction.
-    # Raising ValueError anywhere in here becomes a pydantic.ValidationError.
-    @field_validator("sequence")
-    @classmethod
-    def sequence_must_be_letters(cls, v: str) -> str:
-        cleaned = v.strip().upper()
-        if not cleaned.isalpha():
-            raise ValueError(f"sequence must contain only letters, got: {v!r}")
-        return cleaned  # returned value becomes the stored field value (normalization)
-
-    # Ordinary property — nothing Pydantic-specific here.
-    @property
-    def length(self) -> int:
-        return len(self.sequence)
+from StrucTools import determine_binding_interface, calculate_ipSAE
 
 
 @dataclass
@@ -60,14 +18,15 @@ class StructurePredictionInputs:
     """ Traditional set of inputs for any protein structure prediction model """
 
     design_name: str = Field(default = "") # Name of the design being evaluated
-    seq_list: list[ChainInput] = Field(default_factory=list) # List of sequence inputs for the design
-    template_list: list[ChainInput] = Field(default_factory=list) # List of template paths for the design
+    seq_list: list[str] = Field(default_factory=list) # List of sequences for the design
+    template_list: list[str] = Field(default_factory=list) # List of template paths for the design
     msa_options: list[str] = Field(default_factory=list) # List of MSA options for the design (either 'empty', '', or a .a3m file path)
-    entity_types: list[ChainType] = Field(default_factory=list) # List of entity types for the design: Either protein, dna, or rna
-    ligand_list: list[ChainInput] = Field(default_factory=list) # List of ligand inputs for the design
+    entity_types: list[Literal["protein", "dna", "rna"]] = Field(default_factory=list) # List of entity types for the design: Either protein, dna, or rna
+    ligand_list: list[str] = Field(default_factory=list) # List of ligand SMILES strings for the design
     num_samples: int = Field(default=1) # Number of model samples to generate for the design
     seed: int = Field(default=0) # Random seed for reproducibility of the model samples
     path_output_dir: str = Field(default = "") # Directory where the output files will be saved
+    desired_epitope_residues: list[str] = Field(default_factory=list) # List of desired epitope residues for the design (e.g. ["A10", "B20", "C30"])
 
     @field_validator("design_name")
     @classmethod
@@ -88,15 +47,6 @@ class StructurePredictionInputs:
                 raise ValueError(f"msa_options must be either 'empty', '', or a .a3m file path, got: {option!r}")
         return v
 
-    @field_validator("entity_types")
-    @classmethod
-    def validate_entity_types(cls, entity_types: list[ChainType]) -> list[ChainType]:
-        """ Validate that the entity_types list contains only valid ChainType values"""
-        for entity_type in entity_types:
-            if entity_type not in ChainType:
-                raise ValueError(f"entity_types must be one of {list(ChainType)}, got: {entity_type!r}")
-        return entity_types
-
     @model_validator(mode = "after")
     def validate_output_dir(self) -> StructurePredictionInputs:
         """ Validate that the output_dir is a valid directory path. 
@@ -109,12 +59,40 @@ class StructurePredictionInputs:
             os.makedirs(self.path_output_dir)
         return self
 
+    def analyze_structure_holo(self, path_structure: str, path_pae: str) -> dict:
+        """ Analyze holo structure by doing contact check and calculating ipSAE
+            Return a dictionary with the results of the analysis 
+        """
+        metrics = {}
+        num_targets = len(self.seq_list) - 1
+
+        # 1. Conduct contact check
+        target_chains = ','.join(chr(ord('B') + i) for i in range(num_targets))
+        print("target_chains: ", target_chains)
+        for target_chain_id in target_chains.split(','):
+            hotspots = [hotspot[1:] for hotspot in self.desired_epitope_residues if hotspot[0] == target_chain_id]
+            print("Target chain: ", target_chain_id)
+            contact_information = determine_binding_interface(pdb_file_path= path_structure,
+                                                              hotspots= hotspots,
+                                                              binder_chain_id= "A", target_chain_id= target_chain_id)
+
+            # Append binding interface contacts information
+            metrics.update(contact_information)
+
+        # 2. Calculate ipSAE min and DockQ for each target chain
+        ipsae_dict = calculate_ipSAE(pae_file = path_pae,
+                                     binder_chain = "A",
+                                     target_chains = target_chains,
+                                     path_input_structure = path_structure)
+        ipsae_values = [value for key, value in ipsae_dict.items() if key.startswith("ipSAE_")]
+        if ipsae_values:
+            ipsae_dict["ipsae_min"] = min(ipsae_values) # Min of the ipsae_min for all target chains in the complex
+            ipsae_dict["ipsae_max"] = max(ipsae_values) # Max of the ipsae_min for all target chains in the complex
+        metrics.update(ipsae_dict)
+
+        return metrics
+
+
 
     
-
-
-
-
-
-
     
