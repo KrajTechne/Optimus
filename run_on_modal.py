@@ -41,7 +41,10 @@ BOLTZ_CACHE_MOUNT = "/root/.boltz"
 # ---------------------------------------------------------------------------
 # ESMFold2
 # ---------------------------------------------------------------------------
-esmfold2_image = (
+# Pip-install-only base, deliberately with no add_local_* calls — Modal requires add_local_* to be
+# the last step(s) in an image's build chain, so this stays reusable as a base for other images
+# (e.g. refiner_image below) that need to layer more build steps on top before mounting local files.
+_esmfold2_base_image = (
     modal.Image.debian_slim(python_version="3.12")
     # mmseqs2.py's generate_msa() calls a remote MSA server over HTTP
     # (ColabFold's run_mmseqs2, default host_url=https://api.colabfold.com)
@@ -65,8 +68,9 @@ esmfold2_image = (
     )
     # gemmi/biotite are needed by StrucTools.py (imported via StructurePredictionInputs.py)
     .pip_install("pydantic", "pyyaml", "pandas", "numpy", "requests", "tqdm", "gemmi", "biotite")
-    .add_local_python_source(*_SHARED_LOCAL_MODULES, "RunESMFold2", "mmseqs2")
 )
+
+esmfold2_image = _esmfold2_base_image.add_local_python_source(*_SHARED_LOCAL_MODULES, "RunESMFold2", "mmseqs2")
 
 
 @app.function(
@@ -152,3 +156,60 @@ def run_boltz2() -> list[dict]:
 def boltz2():
     metrics = run_boltz2.remote()
     print(metrics)
+
+
+# ---------------------------------------------------------------------------
+# Refiner (ESMFold2 structure prediction + LigandMPNN/SolubleMPNN sequence design, cycled)
+# ---------------------------------------------------------------------------
+refiner_image = (
+    _esmfold2_base_image
+    # LigandMPNN's own deps beyond what the base image already provides (torch, numpy, pandas, ...).
+    # Installed unpinned rather than matching LigandMPNN/requirements.txt's old pins, since those were
+    # pinned against a much older torch/numpy than the cu130 stack the base image already installs.
+    .pip_install("biopython", "ProDy", "ml-collections", "dm-tree")
+    .apt_install("wget")  # get_model_params.sh shells out to wget; not in debian_slim by default
+    # copy=True (not the default lazy mount) since the get_model_params.sh run_commands step below
+    # needs the file baked into the image layer, not only mounted at function runtime.
+    .add_local_dir("LigandMPNN", "/root/LigandMPNN", copy=True, ignore=["model_params", "*.pt"])
+    .run_commands("bash /root/LigandMPNN/get_model_params.sh /root/LigandMPNN/model_params")
+    # refiner.py imports RunBoltz2 unconditionally at module level even though this image only
+    # exercises the ESMFold2 path, so it needs to be mountable too (RunBoltz2.py itself only imports
+    # lightweight stdlib/pydantic/pandas at module level — no `boltz` package import needed just to import it).
+    .add_local_python_source(*_SHARED_LOCAL_MODULES, "RunESMFold2", "RunBoltz2", "mmseqs2", "refiner")
+)
+
+
+@app.function(
+    image=refiner_image,
+    gpu=GPU_TYPE,
+    volumes={OUTPUTS_MOUNT: outputs_volume},
+    timeout=TIMEOUT_SECONDS,
+)
+def run_refiner(seq_binder: str, seq_target: str, design_name: str, num_cycles: int = 5, ligands: str = "",
+                epitope_residues: str = "", paratope_residues: str = "") -> dict:
+    from refiner import load_model_setup_run, run_refine_cycle
+
+    path_output_dir = f"{OUTPUTS_MOUNT}/{design_name}"
+
+    model, seq_designer = load_model_setup_run(
+        model_name="ESMFold2",
+        design_name=design_name,
+        seq_binder=seq_binder,
+        seq_target=seq_target,
+        ligands= ligands,
+        path_output_dir=path_output_dir,
+    )
+
+    result = run_refine_cycle(
+        model=model, seq_designer=seq_designer, cycle_num=num_cycles, path_output_dir=path_output_dir,
+        epitope_residues=epitope_residues, paratope_residues=paratope_residues,
+    )
+    outputs_volume.commit()
+    return result
+
+
+@app.local_entrypoint()
+def refiner(seq_binder: str, seq_target: str, design_name: str, num_cycles: int = 5, ligands: str = "",
+            epitope_residues: str = "", paratope_residues: str = ""):
+    result = run_refiner.remote(seq_binder, seq_target, design_name, num_cycles, ligands, epitope_residues, paratope_residues)
+    print(result)

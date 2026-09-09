@@ -8,13 +8,16 @@ import biotite.structure.io.pdb as pdb
 import biotite.structure.io.pdbx as pdbx
 
 def extract_atom_array(struc_file_path: str, ca_only = False):
-    """ Extract atom array from either CIF File or PDB File"""
+    """ Extract atom array from either CIF File or PDB File.
+        Preserves b_factor (used to store per-residue pLDDT in ESMFold2/Boltz2 outputs)
+        for visualization — biotite drops it by default unless requested via extra_fields.
+    """
     if struc_file_path.endswith(".cif"):
         pdbx_file = pdbx.CIFFile.read(struc_file_path)
-        atom_array = pdbx.get_structure(pdbx_file=pdbx_file, model = 1)
+        atom_array = pdbx.get_structure(pdbx_file=pdbx_file, model = 1, extra_fields=["b_factor"])
     elif struc_file_path.endswith(".pdb"):
         pdb_file = pdb.PDBFile.read(struc_file_path)
-        atom_array = pdb_file.get_structure(model = 1)
+        atom_array = pdb_file.get_structure(model = 1, extra_fields=["b_factor"])
     else:
         raise ValueError("File must be either a PDB or CIF file")
     if ca_only:
@@ -233,21 +236,24 @@ def determine_binding_interface(pdb_file_path: str, hotspots: list, binder_chain
     obj_protein_seq = seq.ProteinSequence()
 
     # 0. Validate provided input format of hotspots
-    # If residues are provided in list of [f'{chain_id}{res_pos_1indexed}'], extract residues corresponding to specific target_chain_id
-    if any(map(lambda x: x[0].isalpha(), hotspots)):
-        print("Provided hotspots are in string format of chain_respos_1indexed")
-        desired_epitope_residues = [hotspot[1:] for hotspot in hotspots if hotspot[0] == target_chain_id]
-    # If residues are provided in list of [f'{res_pos_1indexed}'], extract residues as is 
-    elif all(map(lambda x: x.isnumeric(), hotspots)):
-        print("Provided hotspots are in string format of respos_1indexed")
-        desired_epitope_residues = hotspots 
-    # If residues provided are already integers
+    # If residues are not provided (or the caller doesn't want a desired-epitope check), continue with
+    # empty list. Checked first since all()/any() over an empty list are vacuously True/False and would
+    # otherwise get intercepted by the numeric/int branches below before ever reaching this case.
+    if not hotspots:
+        print("No hotspots were provided, so no check for whether desired epitope residues are being contacted")
+        desired_epitope_residues = hotspots
+    # If residues provided are already integers. Checked before the string-based branches since x[0]/x.isnumeric()
+    # would raise on an int element rather than correctly falling through to this branch.
     elif all(map(lambda x: type(x) == int, hotspots)):
         print("Provided hotspots are all integer format of respos_1indexed")
         desired_epitope_residues = hotspots
-    # If residues are not provided or user does not want to check whether desired epitope residues are being contacted, continue with empty list
-    elif hotspots == []:
-        print("No hotspots were provided, so no check for whether desired epitope residues are being contacted")
+    # If residues are provided in list of [f'{chain_id}{res_pos_1indexed}'], extract residues corresponding to specific target_chain_id
+    elif any(map(lambda x: x[0].isalpha(), hotspots)):
+        print("Provided hotspots are in string format of chain_respos_1indexed")
+        desired_epitope_residues = [hotspot[1:] for hotspot in hotspots if hotspot[0] == target_chain_id]
+    # If residues are provided in list of [f'{res_pos_1indexed}'], extract residues as is
+    elif all(map(lambda x: x.isnumeric(), hotspots)):
+        print("Provided hotspots are in string format of respos_1indexed")
         desired_epitope_residues = hotspots
     # If none of the above, raise ValueError indicating desired_epitope_residues are not in expected format
     else:
@@ -558,3 +564,11 @@ def convert_pdb_to_cif(input_pdb_path):
     
     print(f"✅ Converted to CIF: {output_cif_path}")
     return output_cif_path
+def convert_cif_to_pdb(input_cif_path):
+    """ Converts a mmCIF file to PDB format using Biotite"""
+    output_pdb_path = input_cif_path.replace('.cif', '.pdb')
+    pdb_file = pdb.PDBFile()
+    atom_array = extract_atom_array(input_cif_path)
+    pdb_file.set_structure(atom_array)
+    pdb_file.write(output_pdb_path)
+    return output_pdb_path

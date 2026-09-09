@@ -207,13 +207,15 @@ class RunESMFold2(StructurePredictionInputs):
                                                seed = self.seed)
         return pred_strucs, yaml_inputs
 
-    def analyze_structure(self, predicted_structure, model_id: int) -> dict:
+    def analyze_structure(self, predicted_structure, model_id: int = 0, path_structure: Optional[str] = None) -> dict:
         """
-        Analyzes the predicted structure and saves the results to a dictionary of metrics associated with the design_name and model_id 
+        Analyzes the predicted structure and saves the results to a dictionary of metrics associated with the design_name and model_id
         Args:
             predicted_structure (StructurePrediction): Predicted structure from ESMFold2
             model_id (int): ID of the model
-            num_targets (int): Number of target chains in complex to analyze
+            path_structure (str, optional): Path to save the structure's CIF file. Defaults to the
+                design_name/seed/model_id-derived path used by predict_analyze(); pass this explicitly
+                for callers (e.g. a refinement loop) that need their own naming/location per call.
         Returns:
             metrics: Dictionary of metrics associated with the design_name and model_id
 
@@ -222,15 +224,18 @@ class RunESMFold2(StructurePredictionInputs):
 
         # Save the predicted structure to a CIF file in the volume_save_path
         # Each design_name gets subfolder, and each model_id is saved within respective design_name folder
-        
+
         # 1. Save predicted structure & associated paths
-        path_predicted_structure = os.path.join(self.path_output_dir, f"{self.design_name}_seed_{self.seed}_model_{model_id}.cif")
+        if path_structure is None:
+            path_predicted_structure = os.path.join(self.path_output_dir, f"{self.design_name}_seed_{self.seed}_model_{model_id}.cif")
+        else:
+            path_predicted_structure = path_structure
         path_predictions = os.path.dirname(path_predicted_structure)
         with open(path_predicted_structure, "w") as f:
             f.write(predicted_structure.complex.to_mmcif())
-    
+
         # 1.5 Save predicted structure's pae matrix: Workaround required to address writing to volume isssue
-        path_predicted_structure_pae = os.path.join(self.path_output_dir, f"{self.design_name}_seed_{self.seed}_model_{model_id}_pae.npz")
+        path_predicted_structure_pae = path_predicted_structure.replace(".cif", "_pae.npz")
         pae_matrix = predicted_structure.pae
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp_npz_stem = os.path.join(tmpdir, 'pae')
@@ -258,6 +263,16 @@ class RunESMFold2(StructurePredictionInputs):
         # 3. Add paths to structure, predictions, and pae path
         metrics.update({"path_structure" : path_predicted_structure, "path_predictions" : path_predictions, "path_pae" : path_predicted_structure_pae})
         return metrics
+
+    def save_structure(self, predicted_structure, path_structure: str):
+        """
+        Saves the predicted structure to a CIF file at the specified path.
+        Args:
+            predicted_structure (StructurePrediction): Predicted structure from ESMFold2
+            path_structure (str): Path to save the predicted structure CIF file
+        """
+        with open(path_structure, "w") as f:
+            f.write(predicted_structure.complex.to_mmcif())
 
 
     def predict_analyze(self) -> pd.DataFrame:
