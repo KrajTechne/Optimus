@@ -269,17 +269,18 @@ def run_mmseqs2(  # noqa: PLR0912, D103, C901, PLR0915
     a3m_lines = {}
     for a3m_file in a3m_files:
         update_M, M = True, None
-        for line in open(a3m_file, "r"):
-            if len(line) > 0:
-                if "\x00" in line:
-                    line = line.replace("\x00", "")
-                    update_M = True
-                if line.startswith(">") and update_M:
-                    M = int(line[1:].rstrip())
-                    update_M = False
-                    if M not in a3m_lines:
-                        a3m_lines[M] = []
-                a3m_lines[M].append(line)
+        with open(a3m_file, "r") as f:
+            for line in f:
+                if len(line) > 0:
+                    if "\x00" in line:
+                        line = line.replace("\x00", "")
+                        update_M = True
+                    if line.startswith(">") and update_M:
+                        M = int(line[1:].rstrip())
+                        update_M = False
+                        if M not in a3m_lines:
+                            a3m_lines[M] = []
+                    a3m_lines[M].append(line)
 
     a3m_lines = ["".join(a3m_lines[n]) for n in Ms]
     return a3m_lines
