@@ -18,6 +18,7 @@ def load_model_setup_run(
         path_output_dir: str,
         ligands: str = "",
         epitope_residues: str = "",
+        msa_options: str = "",
         **kwargs):
     """ Load the model and pass in the design information to initialize the refinment process.
         Intialize also the MPNN wrapper
@@ -33,15 +34,19 @@ def load_model_setup_run(
         desired_epitope_residues = []
     else:
         desired_epitope_residues = [x for x in epitope_residues.split(",") if x.strip()]
+    if msa_options == "":
+        msa_options = []
+    else:
+        msa_options = msa_options.split(',')
 
     # Structure Prediction Model Initialization
     if model_name in ['ESMFold2', 'ESMFold2-Fast']:
         model = RunESMFold2(design_name = design_name, model_name = model_name, seq_list = seq_list, 
                             path_output_dir = path_output_dir, ligand_list= ligand_list, 
-                            desired_epitope_residues = desired_epitope_residues, **kwargs)
+                            desired_epitope_residues = desired_epitope_residues, msa_options= msa_options, **kwargs)
     elif model_name == 'Boltz2':
         model = RunBoltz2(design_name = design_name, seq_list = seq_list, path_output_dir = path_output_dir,
-                          ligand_list= ligand_list, desired_epitope_residues= desired_epitope_residues, **kwargs)
+                          ligand_list= ligand_list, desired_epitope_residues= desired_epitope_residues, msa_options= msa_options, **kwargs)
     else:
         raise ValueError(f"Model name {model_name} is not supported. Please choose from ['ESMFold2', 'Boltz2', 'ESMFold2-Fast']")
 
@@ -98,21 +103,25 @@ def binder_binds_contacts(metrics, target_chain, epitope_residues, paratope_resi
 
     return paratope_ok and epitope_ok
 
-def run_refine_cycle(model, seq_designer, args):
+def run_refine_cycle(model, seq_designer, args, design_count):
     """ 
     Cycle 0: Validate Predicted Structure of the inputs passes initial contact check
     Cycle 1 -> N: Sequence Design -> Structure Prediction
     Run this process for a number of cycles to refine the in-silico designed protein. The output of each cycle is saved in the output directory.
 
     """
-    # Setup:
+    # Setup: Create overarching design_cycles folder and improved_insilico folder
     target_chains = ",".join(chr(ord('B') + i) for i in range(len(model.seq_list) - 1))
-    path_design_cycle_folder = os.path.join(args.path_output_dir, "design_cycles")
+    path_overarching_design_cycle_folder = os.path.join(args.path_output_dir, "design_cycles")
     path_improved_designs_folder = os.path.join(args.path_output_dir, "improved_insilico")
-    if not os.path.exists(path_design_cycle_folder):
-        os.makedirs(path_design_cycle_folder)
+    if not os.path.exists(path_overarching_design_cycle_folder):
+        os.makedirs(path_overarching_design_cycle_folder)
     if not os.path.exists(path_improved_designs_folder):
         os.makedirs(path_improved_designs_folder)
+    # Setup: Create design counter specific folder
+    path_design_specific_folder = os.path.join(path_overarching_design_cycle_folder, f"Run_{design_count}")
+    if not os.path.exists(path_design_specific_folder):
+        os.makedirs(path_design_specific_folder)
 
     # MPNN designs ligand-aware sequences if a ligand is part of the complex, otherwise plain soluble design
     model_type = "ligand_mpnn" if model.ligand_list else "soluble_mpnn"
@@ -120,7 +129,7 @@ def run_refine_cycle(model, seq_designer, args):
 
     # ---- Cycle 0: Predict structure for the initial (un-redesigned) sequence and validate it passes the contact check ----
     predicted_structure, _ = model.predict_structure()
-    path_structure_cycle_0 = os.path.join(path_design_cycle_folder, f"{model.design_name}_cycle_0.cif")
+    path_structure_cycle_0 = os.path.join(path_design_specific_folder, f"{model.design_name}_cycle_0.cif")
     metrics_cycle_0 = model.analyze_structure(predicted_structure, path_structure = path_structure_cycle_0)
     path_pdb_cycle_0 = convert_cif_to_pdb(path_structure_cycle_0)
 
@@ -162,7 +171,7 @@ def run_refine_cycle(model, seq_designer, args):
         # for RunBoltz2 this must match Boltz's own per-call sample numbering (always restarts at
         # model_0), since model_id is used to locate the file on disk, not just to label it. The
         # cycle number itself is already captured in path_structure_cycle's filename below.
-        path_structure_cycle = os.path.join(path_design_cycle_folder, f"{model.design_name}_cycle_{cycle}.cif")
+        path_structure_cycle = os.path.join(path_design_specific_folder, f"{model.design_name}_cycle_{cycle}.cif")
         metrics = model.analyze_structure(predicted_structure, path_structure = path_structure_cycle)
         path_pdb_cycle = convert_cif_to_pdb(path_structure_cycle)
 
@@ -194,6 +203,25 @@ def run_refine_cycle(model, seq_designer, args):
         "best_pdb_path": best_pdb_path,
     }
 
+def iterate_over_design_count(args) -> pd.DataFrame:
+    """ Run the cycling process for N design attempts and each one has K cycles"""
+    results = []
+    for design_count in range(args.num_designs):
+        model, seq_designer = load_model_setup_run(model_name = args.model_name, design_name = args.design_name, seq_binder = args.seq_binder,
+                                         seq_target = args.seq_target, path_output_dir = args.path_output_dir, ligands = args.ligands,
+                                         epitope_residues= args.epitope_residues, msa_options = args.msa_options)
+        
+        result = run_refine_cycle(model = model, seq_designer = seq_designer, args = args, design_count= design_count)
+        result['run_id'] = design_count
+        print("Refinement result:", result)
+        results.append(result)
+
+    # After going through all design attempts:
+    df_designs = pd.DataFrame(results)
+    path_design_csv = os.path.join(args.path_output_dir, args.filename_output)
+    df_designs.to_csv(path_design_csv, index = False)
+    print(f"Saved refinement summary to {path_design_csv}")
+    return path_design_csv
 
 def main():
     parser = argparse.ArgumentParser(description = "Refine in-silico designed proteins via iterative structre prediction -> seq generation cycles.")
@@ -211,7 +239,12 @@ def main():
                         help = "Path to the output directory where the refined designs will be saved.")
 
     # Optional arguments
-    parser.add_argument("--num_cycles", type = int, default = 5)
+    parser.add_argument("--num_cycles", type = int, default = 5,
+                        help = "Number of cycles of seq-design -> structure prediction you want to do per design attempt")
+    parser.add_argument("--num_designs", type = int, default = 1,
+                        help = "Number of designs that you want to generate from initial binder sequence")
+    parser.add_argument("--msa_options", type = str, default = "",
+                        help = "MSA Options for structure prediction. Expecting comma-separated values of 'empty' or ''. The default runs with everything as 'empty'.")
     parser.add_argument("--ligands", type = str, default = "",
                         help = "Comma-separated string of ligands")
     parser.add_argument("--filename_output", type = str, default = "refined_designs.csv")
@@ -225,18 +258,9 @@ def main():
                         help = "Temperature to sample residues during seq redesign. Higher temperature -> greater volatility in the generated sequence")
     args = parser.parse_args()
 
-    model, seq_designer = load_model_setup_run(model_name = args.model_name, design_name = args.design_name, seq_binder = args.seq_binder,
-                                 seq_target = args.seq_target, path_output_dir = args.path_output_dir, ligands = args.ligands)
+    path_design_csv = iterate_over_design_count(args = args)   
 
-    result = run_refine_cycle(model = model, seq_designer = seq_designer, args = args)
-    print("Refinement result:", result)
-
-    df_result = pd.DataFrame([result])
-    path_result_csv = os.path.join(args.path_output_dir, args.filename_output)
-    df_result.to_csv(path_result_csv, index = False)
-    print(f"Saved refinement summary to {path_result_csv}")
-
-    return result
+    return path_design_csv
 
 
 if __name__ == "__main__":

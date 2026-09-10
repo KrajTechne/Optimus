@@ -188,43 +188,61 @@ refiner_image = (
     volumes={OUTPUTS_MOUNT: outputs_volume, BOLTZ_CACHE_MOUNT: boltz_cache_volume},
     timeout=TIMEOUT_SECONDS,
 )
-def run_refiner(model_name:str, seq_binder: str, seq_target: str, design_name: str, num_cycles: int = 5, ligands: str = "",
-                epitope_residues: str = "", paratope_residues: str = "", fixed_residues: str = "",
-                mpnn_temperature: float = 0.10) -> dict:
-    from refiner import load_model_setup_run, run_refine_cycle
+def run_refiner(model_name: str, seq_binder: str, seq_target: str, design_name: str, num_cycles: int = 5, num_designs: int = 1,
+                ligands: str = "", msa_options: str = "", epitope_residues: str = "", paratope_residues: str = "", fixed_residues: str = "",
+                mpnn_temperature: float = 0.10, filename_output: str = "refined_designs.csv") -> str:
+    # iterate_over_design_count(args) owns the full per-design-attempt loop (model setup +
+    # run_refine_cycle, once per design_count) and the summary CSV write, so it's called directly
+    # here rather than duplicating that loop — keeps the CLI (refiner.py main()) and Modal entrypoints
+    # on one code path instead of two that can drift out of sync (as run_refine_cycle's design_count
+    # param did against this function before this fix).
+    from refiner import iterate_over_design_count
 
     path_output_dir = f"{OUTPUTS_MOUNT}/{design_name}"
 
-    model, seq_designer = load_model_setup_run(
+    # iterate_over_design_count/run_refine_cycle read their settings off a single args-like object
+    # (matching refiner.py's own argparse Namespace shape) rather than individual parameters.
+    args = SimpleNamespace(
         model_name=model_name,
         design_name=design_name,
         seq_binder=seq_binder,
         seq_target=seq_target,
-        ligands= ligands,
         path_output_dir=path_output_dir,
-        epitope_residues= epitope_residues
-    )
-
-    # run_refine_cycle(model, seq_designer, args) reads its settings off a single args-like object
-    # (matching refiner.py's own argparse Namespace shape) rather than individual parameters.
-    args = SimpleNamespace(
-        path_output_dir=path_output_dir,
+        ligands=ligands,
+        msa_options = msa_options,
+        num_designs=num_designs,
         num_cycles=num_cycles,
         epitope_residues=epitope_residues,
         paratope_residues=paratope_residues,
         fixed_residues=fixed_residues,
         mpnn_temperature=mpnn_temperature,
+        filename_output=filename_output,
     )
-    result = run_refine_cycle(model=model, seq_designer=seq_designer, args=args)
+    path_design_csv = iterate_over_design_count(args=args)
     outputs_volume.commit()
     boltz_cache_volume.commit()
-    return result
+    return path_design_csv
 
 
 @app.local_entrypoint()
-def refiner(model_name: str, seq_binder: str, seq_target: str, design_name: str, num_cycles: int = 5, ligands: str = "",
-            epitope_residues: str = "", paratope_residues: str = "", fixed_residues: str = "",
-            mpnn_temperature: float = 0.10):
-    result = run_refiner.remote(model_name, seq_binder, seq_target, design_name, num_cycles, ligands, epitope_residues,
-                                 paratope_residues, fixed_residues, mpnn_temperature)
-    print(result)
+def refiner(model_name: str, seq_binder: str, seq_target: str, design_name: str, num_cycles: int = 5, num_designs: int = 1,
+            ligands: str = "", epitope_residues: str = "", paratope_residues: str = "", fixed_residues: str = "",
+            mpnn_temperature: float = 0.10, msa_options: str = "", filename_output: str = "refined_designs.csv"):
+    # Passed as keywords (not positionally) so adding/reordering params here can't silently
+    # mis-bind against run_refiner's signature the way run_refine_cycle's design_count param did.
+    path_design_csv = run_refiner.remote(
+        model_name=model_name,
+        seq_binder=seq_binder,
+        seq_target=seq_target,
+        design_name=design_name,
+        num_cycles=num_cycles,
+        num_designs=num_designs,
+        ligands=ligands,
+        msa_options = msa_options,
+        epitope_residues=epitope_residues,
+        paratope_residues=paratope_residues,
+        fixed_residues=fixed_residues,
+        mpnn_temperature=mpnn_temperature,
+        filename_output=filename_output,
+    )
+    print(path_design_csv)
