@@ -37,8 +37,8 @@ class RunESMFold2(StructurePredictionInputs):
     """ Inputs for running ESMFold2 structure prediction """
 
     model_name: str = Field(default = "ESMFold2") # Name of the model to use for Structure Prediction (default: ESMFold2)
-    num_loops: int = Field(default = 10) # Number of loops (analogous to num_recycles in AlphaFold) to run for the model
-    num_sampling_steps: int = Field(default = 150) # Number of diffusion sampling steps to run for the model
+    num_loops: int = Field(default = 20) # Number of loops (analogous to num_recycles in AlphaFold) to run for the model
+    num_sampling_steps: int = Field(default = 100) # Number of diffusion sampling steps to run for the model
     path_msa_folder: Optional[str] = Field(default = "") # Path to the folder containing MSA files
     reuse_msa: bool = Field(default = True) # Whether to reuse previously generated MSAs or generate new ones
 
