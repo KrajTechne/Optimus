@@ -169,6 +169,7 @@ refiner_image = (
     # Installed unpinned rather than matching LigandMPNN/requirements.txt's old pins, since those were
     # pinned against a much older torch/numpy than the cu130 stack the base image already installs.
     .pip_install("biopython", "ProDy", "ml-collections", "dm-tree")
+    .pip_install("boltz")  # provides the `boltz` CLI that RunBoltz2.predict_structure shells out to (model_name="Boltz2")
     .apt_install("wget")  # get_model_params.sh shells out to wget; not in debian_slim by default
     # copy=True (not the default lazy mount) since the get_model_params.sh run_commands step below
     # needs the file baked into the image layer, not only mounted at function runtime.
@@ -184,10 +185,10 @@ refiner_image = (
 @app.function(
     image=refiner_image,
     gpu=GPU_TYPE,
-    volumes={OUTPUTS_MOUNT: outputs_volume},
+    volumes={OUTPUTS_MOUNT: outputs_volume, BOLTZ_CACHE_MOUNT: boltz_cache_volume},
     timeout=TIMEOUT_SECONDS,
 )
-def run_refiner(seq_binder: str, seq_target: str, design_name: str, num_cycles: int = 5, ligands: str = "",
+def run_refiner(model_name:str, seq_binder: str, seq_target: str, design_name: str, num_cycles: int = 5, ligands: str = "",
                 epitope_residues: str = "", paratope_residues: str = "", fixed_residues: str = "",
                 mpnn_temperature: float = 0.10) -> dict:
     from refiner import load_model_setup_run, run_refine_cycle
@@ -195,12 +196,13 @@ def run_refiner(seq_binder: str, seq_target: str, design_name: str, num_cycles: 
     path_output_dir = f"{OUTPUTS_MOUNT}/{design_name}"
 
     model, seq_designer = load_model_setup_run(
-        model_name="ESMFold2",
+        model_name=model_name,
         design_name=design_name,
         seq_binder=seq_binder,
         seq_target=seq_target,
         ligands= ligands,
         path_output_dir=path_output_dir,
+        epitope_residues= epitope_residues
     )
 
     # run_refine_cycle(model, seq_designer, args) reads its settings off a single args-like object
@@ -215,13 +217,14 @@ def run_refiner(seq_binder: str, seq_target: str, design_name: str, num_cycles: 
     )
     result = run_refine_cycle(model=model, seq_designer=seq_designer, args=args)
     outputs_volume.commit()
+    boltz_cache_volume.commit()
     return result
 
 
 @app.local_entrypoint()
-def refiner(seq_binder: str, seq_target: str, design_name: str, num_cycles: int = 5, ligands: str = "",
+def refiner(model_name: str, seq_binder: str, seq_target: str, design_name: str, num_cycles: int = 5, ligands: str = "",
             epitope_residues: str = "", paratope_residues: str = "", fixed_residues: str = "",
             mpnn_temperature: float = 0.10):
-    result = run_refiner.remote(seq_binder, seq_target, design_name, num_cycles, ligands, epitope_residues,
+    result = run_refiner.remote(model_name, seq_binder, seq_target, design_name, num_cycles, ligands, epitope_residues,
                                  paratope_residues, fixed_residues, mpnn_temperature)
     print(result)

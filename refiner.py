@@ -121,7 +121,7 @@ def run_refine_cycle(model, seq_designer, args):
     # ---- Cycle 0: Predict structure for the initial (un-redesigned) sequence and validate it passes the contact check ----
     predicted_structure, _ = model.predict_structure()
     path_structure_cycle_0 = os.path.join(path_design_cycle_folder, f"{model.design_name}_cycle_0.cif")
-    metrics_cycle_0 = model.analyze_structure(predicted_structure, model_id = 0, path_structure = path_structure_cycle_0)
+    metrics_cycle_0 = model.analyze_structure(predicted_structure, path_structure = path_structure_cycle_0)
     path_pdb_cycle_0 = convert_cif_to_pdb(path_structure_cycle_0)
 
     contact_check_res_cycle_0 = [
@@ -158,8 +158,12 @@ def run_refine_cycle(model, seq_designer, args):
 
         # 3. Analyze: saves the CIF at our chosen per-cycle path, plus PAE, ptm/iptm/plddt, and (for
         # holo) contact/ipSAE metrics for every target chain in one call.
+        # model_id=0 (not `cycle`) because each cycle is a fresh single-sample prediction call —
+        # for RunBoltz2 this must match Boltz's own per-call sample numbering (always restarts at
+        # model_0), since model_id is used to locate the file on disk, not just to label it. The
+        # cycle number itself is already captured in path_structure_cycle's filename below.
         path_structure_cycle = os.path.join(path_design_cycle_folder, f"{model.design_name}_cycle_{cycle}.cif")
-        metrics = model.analyze_structure(predicted_structure, model_id = cycle, path_structure = path_structure_cycle)
+        metrics = model.analyze_structure(predicted_structure, path_structure = path_structure_cycle)
         path_pdb_cycle = convert_cif_to_pdb(path_structure_cycle)
 
         # 4. Contact check for this cycle's structure, using analyze_structure()'s own metrics
