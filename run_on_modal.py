@@ -16,6 +16,8 @@ Usage:
 Edit the hardcoded example inputs inside `run_esmfold2` / `run_boltz2`
 below to point at your actual design.
 """
+from types import SimpleNamespace
+
 import modal
 
 app = modal.App("structure-prediction")
@@ -186,7 +188,8 @@ refiner_image = (
     timeout=TIMEOUT_SECONDS,
 )
 def run_refiner(seq_binder: str, seq_target: str, design_name: str, num_cycles: int = 5, ligands: str = "",
-                epitope_residues: str = "", paratope_residues: str = "") -> dict:
+                epitope_residues: str = "", paratope_residues: str = "", fixed_residues: str = "",
+                mpnn_temperature: float = 0.10) -> dict:
     from refiner import load_model_setup_run, run_refine_cycle
 
     path_output_dir = f"{OUTPUTS_MOUNT}/{design_name}"
@@ -200,16 +203,25 @@ def run_refiner(seq_binder: str, seq_target: str, design_name: str, num_cycles: 
         path_output_dir=path_output_dir,
     )
 
-    result = run_refine_cycle(
-        model=model, seq_designer=seq_designer, cycle_num=num_cycles, path_output_dir=path_output_dir,
-        epitope_residues=epitope_residues, paratope_residues=paratope_residues,
+    # run_refine_cycle(model, seq_designer, args) reads its settings off a single args-like object
+    # (matching refiner.py's own argparse Namespace shape) rather than individual parameters.
+    args = SimpleNamespace(
+        path_output_dir=path_output_dir,
+        num_cycles=num_cycles,
+        epitope_residues=epitope_residues,
+        paratope_residues=paratope_residues,
+        fixed_residues=fixed_residues,
+        mpnn_temperature=mpnn_temperature,
     )
+    result = run_refine_cycle(model=model, seq_designer=seq_designer, args=args)
     outputs_volume.commit()
     return result
 
 
 @app.local_entrypoint()
 def refiner(seq_binder: str, seq_target: str, design_name: str, num_cycles: int = 5, ligands: str = "",
-            epitope_residues: str = "", paratope_residues: str = ""):
-    result = run_refiner.remote(seq_binder, seq_target, design_name, num_cycles, ligands, epitope_residues, paratope_residues)
+            epitope_residues: str = "", paratope_residues: str = "", fixed_residues: str = "",
+            mpnn_temperature: float = 0.10):
+    result = run_refiner.remote(seq_binder, seq_target, design_name, num_cycles, ligands, epitope_residues,
+                                 paratope_residues, fixed_residues, mpnn_temperature)
     print(result)

@@ -3,6 +3,7 @@ import os
 import shutil
 import yaml
 import pandas as pd
+import numpy as np
 
 from RunBoltz2 import RunBoltz2
 from RunESMFold2 import RunESMFold2
@@ -16,23 +17,31 @@ def load_model_setup_run(
         seq_target: str, 
         path_output_dir: str,
         ligands: str = "",
+        epitope_residues: str = "",
         **kwargs):
     """ Load the model and pass in the design information to initialize the refinment process.
         Intialize also the MPNN wrapper
         This function returns a class instance of the model that can be used to run the refinement process.
     """
-    # Structure Prediction Model Initialization
+    # Convert inputs into desired format for each Structure Prediction Model
     seq_list = [seq_binder] + seq_target.split(",")
     if ligands == "":
         ligand_list = []
     else:
         ligand_list = ligands.split(",")
+    if epitope_residues == "":
+        desired_epitope_residues = []
+    else:
+        desired_epitope_residues = [x for x in epitope_residues.split(",") if x.strip()]
+
+    # Structure Prediction Model Initialization
     if model_name in ['ESMFold2', 'ESMFold2-Fast']:
         model = RunESMFold2(design_name = design_name, model_name = model_name, seq_list = seq_list, 
-                            path_output_dir = path_output_dir, ligand_list= ligand_list, **kwargs)
+                            path_output_dir = path_output_dir, ligand_list= ligand_list, 
+                            desired_epitope_residues = desired_epitope_residues, **kwargs)
     elif model_name == 'Boltz2':
         model = RunBoltz2(design_name = design_name, seq_list = seq_list, path_output_dir = path_output_dir,
-                          ligand_list= ligand_list, **kwargs)
+                          ligand_list= ligand_list, desired_epitope_residues= desired_epitope_residues, **kwargs)
     else:
         raise ValueError(f"Model name {model_name} is not supported. Please choose from ['ESMFold2', 'Boltz2', 'ESMFold2-Fast']")
 
@@ -41,21 +50,16 @@ def load_model_setup_run(
 
     return model, seq_designer
 
-def design_sequence(
-    designer,
-    model_type,
-    pdb_file,
-    chains_to_design="A",
-    omit_AA="C",
-    bias_AA="",
-    temperature=0.10,
-    return_logits=False,
-):
+def design_sequence(designer,model_type,pdb_file,chains_to_design="A",omit_AA="C",bias_AA="",temperature=0.10,return_logits=False,
+                    fixed_residues = "", seed = 111):
     """Runs the LigandMPNN (or SolubleMPNN) sequence design wrapper."""
+    if seed is None:
+        seed = int(np.random.randint(0, high = 99999, size = 1, dtype = int)[0])
+    
     seq, logits = designer.run(
         model_type=model_type,
         pdb_path=pdb_file,
-        seed=111, # Fixed seed for reproducibility per design tool
+        seed=seed, # Fixed seed for reproducibility per design tool
         chains_to_design=chains_to_design,
         bias_AA=bias_AA,
         omit_AA=omit_AA,
@@ -63,6 +67,7 @@ def design_sequence(
         extra_args={
             "--temperature": temperature,
             "--batch_size": 1,
+            "--fixed_residues" : fixed_residues,
         },
     )
     if return_logits:
@@ -93,7 +98,7 @@ def binder_binds_contacts(metrics, target_chain, epitope_residues, paratope_resi
 
     return paratope_ok and epitope_ok
 
-def run_refine_cycle(model, seq_designer, cycle_num, path_output_dir, epitope_residues, paratope_residues, mpnn_temperature = 0.10,):
+def run_refine_cycle(model, seq_designer, args):
     """ 
     Cycle 0: Validate Predicted Structure of the inputs passes initial contact check
     Cycle 1 -> N: Sequence Design -> Structure Prediction
@@ -102,8 +107,8 @@ def run_refine_cycle(model, seq_designer, cycle_num, path_output_dir, epitope_re
     """
     # Setup:
     target_chains = ",".join(chr(ord('B') + i) for i in range(len(model.seq_list) - 1))
-    path_design_cycle_folder = os.path.join(path_output_dir, "design_cycles")
-    path_improved_designs_folder = os.path.join(path_output_dir, "improved_insilico")
+    path_design_cycle_folder = os.path.join(args.path_output_dir, "design_cycles")
+    path_improved_designs_folder = os.path.join(args.path_output_dir, "improved_insilico")
     if not os.path.exists(path_design_cycle_folder):
         os.makedirs(path_design_cycle_folder)
     if not os.path.exists(path_improved_designs_folder):
@@ -113,11 +118,6 @@ def run_refine_cycle(model, seq_designer, cycle_num, path_output_dir, epitope_re
     model_type = "ligand_mpnn" if model.ligand_list else "soluble_mpnn"
     print("MPNN Model being used: ", model_type)
 
-    # analyze_structure_holo (called inside analyze_structure) reads desired epitope residues from this
-    # field and does its own per-target-chain filtering, so epitope contact info comes straight out of
-    # analyze_structure()'s metrics — no separate structural-analysis call needed in this function.
-    model.desired_epitope_residues = [x for x in epitope_residues.split(",") if x.strip()]
-
     # ---- Cycle 0: Predict structure for the initial (un-redesigned) sequence and validate it passes the contact check ----
     predicted_structure, _ = model.predict_structure()
     path_structure_cycle_0 = os.path.join(path_design_cycle_folder, f"{model.design_name}_cycle_0.cif")
@@ -126,7 +126,7 @@ def run_refine_cycle(model, seq_designer, cycle_num, path_output_dir, epitope_re
 
     contact_check_res_cycle_0 = [
         binder_binds_contacts(metrics = metrics_cycle_0, target_chain = target_chain,
-                               epitope_residues = epitope_residues, paratope_residues = paratope_residues)
+                               epitope_residues = args.epitope_residues, paratope_residues = args.paratope_residues)
         for target_chain in target_chains.split(",")
     ]
     contact_check_passed_cycle_0 = all(contact_check_res_cycle_0)
@@ -144,10 +144,10 @@ def run_refine_cycle(model, seq_designer, cycle_num, path_output_dir, epitope_re
     prev_pdb_path = path_pdb_cycle_0
 
     # ---- Cycles 1 -> N: Sequence Design -> Structure Prediction ----
-    for cycle in range(1, cycle_num + 1):
+    for cycle in range(1, args.num_cycles + 1):
         # 1. Design a new binder sequence via MPNN, conditioned on the previous cycle's structure
-        seq_str, _ = design_sequence(seq_designer, model_type, pdb_file = prev_pdb_path,
-                                            chains_to_design = "A", temperature = mpnn_temperature)
+        seq_str, _ = design_sequence(seq_designer, model_type, pdb_file = prev_pdb_path, fixed_residues= args.fixed_residues,
+                                            chains_to_design = "A", temperature = args.mpnn_temperature)
         print("MPNN_Derived_Binder_Seq: ", seq_str)
         new_binder_seq = seq_str.split(":")[0] 
 
@@ -165,7 +165,7 @@ def run_refine_cycle(model, seq_designer, cycle_num, path_output_dir, epitope_re
         # 4. Contact check for this cycle's structure, using analyze_structure()'s own metrics
         contact_check_res = [
             binder_binds_contacts(metrics = metrics, target_chain = target_chain,
-                                   epitope_residues = epitope_residues, paratope_residues = paratope_residues)
+                                   epitope_residues = args.epitope_residues, paratope_residues = args.paratope_residues)
             for target_chain in target_chains.split(",")
         ]
         contact_check_passed = all(contact_check_res)
@@ -193,6 +193,7 @@ def run_refine_cycle(model, seq_designer, cycle_num, path_output_dir, epitope_re
 
 def main():
     parser = argparse.ArgumentParser(description = "Refine in-silico designed proteins via iterative structre prediction -> seq generation cycles.")
+
     # Required arguments
     parser.add_argument("seq_binder", type = str, 
                         help = "Binder sequence to refine")
@@ -204,23 +205,26 @@ def main():
                         help = "Name of the design to refine. This will be used to name the output files.")
     parser.add_argument("path_output_dir", type = str, 
                         help = "Path to the output directory where the refined designs will be saved.")
+
     # Optional arguments
     parser.add_argument("--num_cycles", type = int, default = 5)
     parser.add_argument("--ligands", type = str, default = "",
                         help = "Comma-separated string of ligands")
     parser.add_argument("--filename_output", type = str, default = "refined_designs.csv")
     parser.add_argument("--paratope_residues", type = str, default = "",
-                        help = "Comma-separated string of paratope residues binder should interact wit. e.g. 'A10,B20,C30'.")
+                        help = "Comma-separated string of residues on the binder that should interact with the target. e.g. 'A10,A11,A12'.")
     parser.add_argument("--epitope_residues", type = str, default = "",
-                        help = "Comma-separated string of epitope residues to bias the design towards. e.g. 'A10,B20,C30'.")
-
+                        help = "Comma-separated string of residues on the target that should interact with the binder. e.g. 'B10,B20,C30'.")
+    parser.add_argument("--fixed_residues", type = str, default = "",
+                        help = "Space-separated string of residues on the binder that should be fixed during MPNN seq redesign. e.g. A10 A11 A12 A13" )
+    parser.add_argument("--mpnn_temperature", type = float, default = 0.1,
+                        help = "Temperature to sample residues during seq redesign. Higher temperature -> greater volatility in the generated sequence")
     args = parser.parse_args()
 
     model, seq_designer = load_model_setup_run(model_name = args.model_name, design_name = args.design_name, seq_binder = args.seq_binder,
                                  seq_target = args.seq_target, path_output_dir = args.path_output_dir, ligands = args.ligands)
 
-    result = run_refine_cycle(model = model, seq_designer = seq_designer, cycle_num = args.num_cycles, path_output_dir = args.path_output_dir,
-                              epitope_residues = args.epitope_residues, paratope_residues = args.paratope_residues)
+    result = run_refine_cycle(model = model, seq_designer = seq_designer, args = args)
     print("Refinement result:", result)
 
     df_result = pd.DataFrame([result])
