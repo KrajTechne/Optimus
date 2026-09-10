@@ -7,6 +7,7 @@ diffusion/recycling controls and an affinity-prediction toggle on top of
 StructurePredictionInputs.
 """
 from __future__ import annotations
+from typing import Optional
 from pydantic import Field, field_validator
 from pydantic.dataclasses import dataclass
 
@@ -36,32 +37,39 @@ class RunBoltz2(StructurePredictionInputs):
             raise ValueError(f"must be a positive integer, got: {v}")
         return v
 
-    def create_boltz_yaml(self):
-        """ 
-        Create YAML File for running structure prediction with Boltz2
-        Returns:
-            - yaml_file (str): Path to the YAML file
+    def predict_structure(self):
         """
-        # Setup initial yaml file inputs
+        Build the Boltz2 input YAML, run structure prediction via the `boltz` CLI, and copy the
+        results into path_output_dir. Collapsed from the previous separate create_boltz_yaml() +
+        predict_structure(temp_save_dir, yaml_save_path) so this has the same no-arg shape as
+        RunESMFold2.predict_structure() — needed so a caller (e.g. the refiner) can drive either
+        model class the same way.
 
+        Returns:
+            (None, yaml_data): None in the first slot since Boltz2 has no in-memory structure
+                object to hand back (unlike ESMFold2) — results are read back from disk by
+                analyze_structure() instead. yaml_data is the dict of inputs used for this
+                prediction, returned so callers can archive it (matching predict_structure()'s
+                (predicted_structure, yaml_inputs) shape on RunESMFold2).
+        """
+        # ---- Build the input YAML ----
         chains = [chr(ord('A') + i) for i in range(len(self.seq_list))]
         print("Chains: ", chains)
 
         if self.entity_types == []:
             self.entity_types = ['protein'] * len(self.seq_list)
 
-        # 2. Create a dictionary with the Boltz2 modelling options for each seq. Templates & Constraints can be added as another key-list pair
+        # Create a dictionary with the Boltz2 modelling options for each seq. Templates & Constraints can be added as another key-list pair
         yaml_data = {"version" : 1, "sequences" : [], "templates" : []}
 
-        # 2.5 Provide options if msa_options and template_list are empty lists
+        # Provide options if msa_options and template_list are empty lists
         if self.msa_options == []:
             self.msa_options = ["empty"] * len(self.seq_list)
         if self.template_list == []:
             self.template_list = [""] * len(self.seq_list)
-        
-        # 3. Loop through each sequence and create a dictionary for each sequence with its associated entity type, chain ID, and MSA option. If a template is provided, add it to the templates list.
+
+        # Loop through each sequence and create a dictionary for each sequence with its associated entity type, chain ID, and MSA option. If a template is provided, add it to the templates list.
         for index in range(len(self.seq_list)):
-            # Convert sequence to associated entity type
             # entity_types is list[Literal["protein", "dna", "rna"]], so entries are
             # already plain strings — safe to use directly as a YAML dict key.
             entity_dict = {
@@ -80,7 +88,7 @@ class RunBoltz2(StructurePredictionInputs):
                     "chain_id" : chains[index],
                 }
                 yaml_data["templates"].append(template_dict)
-    
+
         # Added because of potential to add ligands to modelling (Useful for modelling Magnesium ('[Mg+2]') or Manganese ('[Mn+2']))
         if self.ligand_list != []:
             for index, lig in enumerate(self.ligand_list):
@@ -92,12 +100,12 @@ class RunBoltz2(StructurePredictionInputs):
                     }
                 }
                 yaml_data["sequences"].append(entity_dict)
-    
+
         print("Yaml Data: --------------")
         print(yaml_data)
         print("--------------------------")
 
-        # 3. Have to define save path and create overarching design folder first, prior to saving/creating yaml file
+        # Have to define save path and create overarching design folder first, prior to saving/creating yaml file
         temp_save_dir = f"/tmp/{self.design_name}"
         if os.path.exists(temp_save_dir):
             shutil.rmtree(temp_save_dir)
@@ -106,17 +114,7 @@ class RunBoltz2(StructurePredictionInputs):
         with open(yaml_save_path, "w") as file:
             yaml.dump(yaml_data, file)
 
-        return temp_save_dir, yaml_save_path
-
-    def predict_structure(self, temp_save_dir: str, yaml_save_path: str):
-        """ 
-        Run Boltz2 to generate structures, save them to temporary directory and then move to final output directory.
-        Args:
-            - temp_save_dir (str): Path to the temporary save directory
-            - yaml_save_path (str): Path to the YAML file
-        """
-        # 1. Run Boltz Structure Prediction
-        # Define your command as a list of strings
+        # ---- Run Boltz2 structure prediction ----
         command = [
             "boltz", "predict", str(yaml_save_path),
             "--diffusion_samples", str(self.num_samples),
@@ -137,33 +135,39 @@ class RunBoltz2(StructurePredictionInputs):
         # Run the command
         print("Running Boltz prediction...")
         subprocess.run(command, check=True)
-    
-        # 2. yaml_save_path already lives inside temp_save_dir (as {design_name}.yaml)
-        # so it gets picked up by the copytree below without needing a separate move —
-        # the previous shutil.move here renamed it to a path with no ".yaml" extension
-        # and no pre-existing directory, which collided with the "predictions" folder
-        # analyze_structure expects to find there (NotADirectoryError).
 
-        # 3. Use shutil.copytree instead of dbutils
+        # Use shutil.copytree instead of dbutils
         # dirs_exist_ok=True allows it to overwrite/merge if the folder already exists
         shutil.copytree(temp_save_dir, self.path_output_dir, dirs_exist_ok=True)
 
-    def analyze_structure(self, model_id: int):
+        return None, yaml_data
+
+    def analyze_structure(self, predicted_structure = None, model_id: int = 0, path_structure: Optional[str] = None):
         """
             Analyze the structure of a given design
             Args:
-                model_id (int): ID of the model
+                predicted_structure: unused — accepted only, and positioned first, so callers (e.g. the
+                                    refiner) can drive RunBoltz2 and RunESMFold2 through the same
+                                    analyze_structure(predicted_structure, model_id=..., path_structure=...)
+                                    call shape. Boltz2 has nothing in-memory to pass; its results are read
+                                    back from the files predict_structure() already wrote to disk. Must stay
+                                    the first positional param — RunESMFold2.analyze_structure's first
+                                    positional param is its (required) predicted_structure, and refiner.py
+                                    calls both model types with the same positional-first-arg call shape.
+                model_id (int): ID of the model (Used when predicting multiple samples within same structure prediction call)
+                path_structure (str, optional): if given, the analyzed CIF is copied here after being
+                    read from Boltz's own fixed, design_name-derived output location — Boltz's CLI
+                    doesn't support writing to an arbitrary path directly the way ESMFold2's in-process
+                    writer does, so an explicit copy is the only way to give each call a distinct,
+                    non-overwritten archived copy (e.g. one per refiner cycle).
             Returns:
                 metrics: Dictionary of metrics for given design's model_id structure
         """
         metrics = {"design_id" : f"{self.design_name}_{model_id}", "design_name": self.design_name, "model_id": model_id}
-    
+
         # 1. Load the structure & path to Boltz2 structure confidence metrics along with pae_matrix path for ipsae calculations
-        # Boltz's actual output layout (confirmed via a real run, boltz_results_{design_name}
-        # sits directly under path_output_dir — no extra {design_name}/ nesting above it):
-        # {path_output_dir}/boltz_results_{design_name}/predictions/{design_name}/...
-        path_structure = f"{self.path_output_dir}/boltz_results_{self.design_name}/predictions/{self.design_name}/{self.design_name}_model_{model_id}.cif"
-        path_predictions = "/".join(path_structure.split('/')[:-1])
+        path_structure_boltz = f"{self.path_output_dir}/boltz_results_{self.design_name}/predictions/{self.design_name}/{self.design_name}_model_{model_id}.cif"
+        path_predictions = "/".join(path_structure_boltz.split('/')[:-1])
         path_confidence = path_predictions + f"/confidence_{self.design_name}_model_{model_id}.json"
         path_pae = path_predictions + f"/pae_{self.design_name}_model_{model_id}.npz"
 
@@ -175,13 +179,20 @@ class RunBoltz2(StructurePredictionInputs):
         # Major 3: Determine Binding Interface Metrics & Do Ipsae Calculations
         num_targets = len(self.seq_list) - 1
         if num_targets >= 1:
-            metrics_holo = self.analyze_structure_holo(path_structure = path_structure, path_pae = path_pae)
+            metrics_holo = self.analyze_structure_holo(path_structure = path_structure_boltz, path_pae = path_pae)
             metrics.update(metrics_holo)
 
-        # Major 4. Add paths to structure, predictions, confidence, pae matrices
-        metrics.update({"path_structure": path_structure, "path_predictions": path_predictions, "path_confidence": path_confidence, 
-                    "path_pae": path_pae})
-    
+        # 4. If the user wants this structure archived somewhere specific, i.e for iterative structure refinement 
+        # Boltz's own output location gets overwritten by the next predict_structure() call
+        # Thus, copy over the structure to the new destination prior to next predict_structure() call
+        if path_structure is not None and path_structure != path_structure_boltz:
+            shutil.copy2(path_structure_boltz, path_structure)
+        final_path_structure = path_structure if path_structure is not None else path_structure_boltz
+
+        # 5. Add paths to structure, predictions, confidence, pae matrices
+        metrics.update({"path_structure": final_path_structure, "path_predictions": path_predictions, "path_confidence": path_confidence,
+                        "path_pae": path_pae})
+
         return metrics
 
     def boltz_predict_analyze(self):
@@ -191,8 +202,7 @@ class RunBoltz2(StructurePredictionInputs):
             - df_design_metrics (pd.DataFrame): DataFrame containing metrics for all models of the design
         """
         # 1. Create Boltz2 Input YAML file and run Boltz2 prediction
-        temp_save_dir, yaml_save_path = self.create_boltz_yaml()
-        self.predict_structure(temp_save_dir = temp_save_dir, yaml_save_path = yaml_save_path)
+        self.predict_structure()
 
         # For each of the "num_models" predicted, analyze the structure
         metrics_design = []
