@@ -569,6 +569,15 @@ def convert_cif_to_pdb(input_cif_path):
     output_pdb_path = input_cif_path.replace('.cif', '.pdb')
     pdb_file = pdb.PDBFile()
     atom_array = extract_atom_array(input_cif_path)
+    # PDB format's res_name field is fixed at 3 characters. Boltz2 names ligand residues "LIG" but
+    # appends a per-entity index (e.g. "LIG1") once there's more than one non-ligand entity before
+    # it, which biotite's PDB writer rejects outright (BadStructureError: "Some residue names
+    # exceed 3 characters"). Truncate any over-length residue name back down to "LIG" — downstream
+    # code (StrucTools' epitope labeling) already matches ligand residues via `"LIG" in res_name`,
+    # not exact equality, so this doesn't break anything reading the result.
+    long_names = np.char.str_len(atom_array.res_name) > 3
+    if np.any(long_names):
+        atom_array.res_name[long_names] = "LIG"
     pdb_file.set_structure(atom_array)
     pdb_file.write(output_pdb_path)
     return output_pdb_path
