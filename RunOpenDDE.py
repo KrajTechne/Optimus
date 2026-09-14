@@ -23,6 +23,7 @@ import pandas as pd
 
 from runner.batch_inference import get_default_runner
 from runner.inference import infer_predict
+from mmseqs2 import generate_msa
 
 # Pinned to the revision recorded in the installed opendde package's own bundled manifest
 # (opendde/config/model_manifest.json) — the antibody-antigen checkpoint isn't covered by
@@ -38,6 +39,13 @@ _ABAG_CHECKPOINT_REVISION = "eddd563ce96571f784012edd8f045181c8f8627d"
 # input_json_path is the only thing that safely varies per call (mutated on runner.configs).
 _runner_cache: dict = {}
 
+# search_msa_every_cycle=False path only: caches each chain's own UNPAIRED MSA search result
+# by exact sequence string, so a chain whose sequence is unchanged across refiner cycles (the
+# target, typically) is only searched once. Deliberately NOT used for the paired/multimer
+# search — pairing is specific to the whole chain combination submitted together, so it can't
+# be meaningfully cached across cycles where the binder sequence keeps changing.
+_unpaired_msa_cache: dict = {}
+
 
 @dataclass
 class RunOpenDDE(StructurePredictionInputs):
@@ -52,6 +60,16 @@ class RunOpenDDE(StructurePredictionInputs):
     use_tfg_guidance: bool = Field(default=True) # Training-free guidance at diffusion sampling time — part of the validated recipe that got 0.64A target-chain RMSD in evaluation
     num_recycles: int = Field(default=10) # Number of Pairformer recycling cycles
     num_sampling_steps: int = Field(default=200) # Number of diffusion sampling steps
+    search_msa_every_cycle: bool = Field(default=True)
+    # True (default): every predict_structure() call runs OpenDDE's own preprocess_input(),
+    # which live-searches ALL protein chains in the job together whenever any chain lacks a
+    # valid MSA path — correct for both a de novo binder and a natural/known one being
+    # refined, since paired-MSA pairing is specific to the exact chain combination and only
+    # means anything if it's computed against whatever the binder currently is that cycle.
+    # Costs a real search every cycle. False: skips the paired/multimer search entirely and
+    # only fetches each chain's own unpaired MSA, cached per exact sequence string — a chain
+    # whose sequence doesn't change across cycles (the target) is only searched once, but you
+    # give up cross-chain co-evolutionary signal for whichever chain does change (the binder).
 
     @field_validator("num_recycles", "num_sampling_steps")
     @classmethod
@@ -106,6 +124,19 @@ class RunOpenDDE(StructurePredictionInputs):
             )
         return _runner_cache[cache_key]
 
+    def _cached_unpaired_msa_path(self, seq: str, chain_id: str) -> str:
+        """
+        search_msa_every_cycle=False path — see the field's docstring. Uses mmseqs2.py's
+        generate_msa (the same ColabFold-hosted MSA generation RunESMFold2 already relies on)
+        rather than OpenDDE's own runner.msa_search, purely for code reuse — both ultimately
+        hit the same public ColabFold API by default.
+        """
+        if seq not in _unpaired_msa_cache:
+            msa_dir = os.path.join(self.path_output_dir, ".opendde_msa_cache")
+            os.makedirs(msa_dir, exist_ok=True)
+            _unpaired_msa_cache[seq] = generate_msa(chain_id=chain_id, sequence=seq, msa_dir=msa_dir)
+        return _unpaired_msa_cache[seq]
+
     def predict_structure(self):
         """
         Build the OpenDDE input job JSON and run structure prediction via a cached, in-process
@@ -143,11 +174,17 @@ class RunOpenDDE(StructurePredictionInputs):
                 "count": 1,
                 "id": [chains[index]],
             }
-            # An explicit .a3m path is used directly as this chain's precomputed MSA; 'empty'
-            # and '' (live search) both need no per-chain field — see _resolve_use_msa() for
-            # how '' vs 'empty' feeds into the job-level use_msa switch OpenDDE actually reads.
-            if ".a3m" in self.msa_options[index]:
-                entity_dict["unpairedMsaPath"] = self.msa_options[index]
+            option = self.msa_options[index]
+            if ".a3m" in option:
+                # Explicit precomputed MSA — used directly, no search either way.
+                entity_dict["unpairedMsaPath"] = option
+            elif option == "" and not self.search_msa_every_cycle and self.entity_types[index] == "protein":
+                # Cheap path (see search_msa_every_cycle docstring): fetch just this chain's
+                # own unpaired MSA, cached per sequence string, skip pairing entirely. When
+                # search_msa_every_cycle=True instead, this chain is left path-less here on
+                # purpose — preprocess_input() below searches (and pairs) it together with
+                # every other protein chain still missing a path.
+                entity_dict["unpairedMsaPath"] = self._cached_unpaired_msa_path(self.seq_list[index], chains[index])
             sequences.append({entity_key[self.entity_types[index]]: entity_dict})
 
         # Added because of potential to add ligands to modelling (Useful for modelling Magnesium ('[Mg+2]') or Manganese ('[Mn+2']))
@@ -165,6 +202,14 @@ class RunOpenDDE(StructurePredictionInputs):
         job_path = os.path.join(job_dir, f"{self.design_name}.json")
         with open(job_path, "w") as f:
             json.dump([job], f)
+
+        if self.search_msa_every_cycle and self._resolve_use_msa():
+            # Searches (and pairs) every protein chain in the job that's still missing a
+            # valid MSA path — fresh each call, correct for a binder sequence that changes
+            # every cycle. Returns a path to an updated JSON; the original job_path/job dict
+            # (returned below for archiving) intentionally still reflects the pre-search state.
+            from runner.batch_inference import preprocess_input
+            job_path = preprocess_input(input_json=job_path, out_dir=job_dir, use_msa=True)
 
         runner = self._get_runner()
         runner.configs.input_json_path = job_path
