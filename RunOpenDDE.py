@@ -21,9 +21,12 @@ import shutil
 import numpy as np
 import pandas as pd
 
-from runner.batch_inference import get_default_runner
-from runner.inference import infer_predict
 from mmseqs2 import generate_msa
+
+# get_default_runner/infer_predict/preprocess_input (from runner.batch_inference/runner.inference)
+# are imported lazily, inside the methods that use them, rather than here at module level —
+# matching RunBoltz2.py's design: this file should stay importable (e.g. for refiner.py's other
+# lazy model-import branches, or plain introspection) without requiring `opendde` installed.
 
 # Pinned to the revision recorded in the installed opendde package's own bundled manifest
 # (opendde/config/model_manifest.json) — the antibody-antigen checkpoint isn't covered by
@@ -94,6 +97,7 @@ class RunOpenDDE(StructurePredictionInputs):
 
     def _get_runner(self):
         """ Build (or reuse a cached) InferenceRunner for this instance's settings. """
+        from runner.batch_inference import get_default_runner
         cache_key = (
             self.checkpoint, self._resolve_use_msa(), self.use_tfg_guidance,
             self.num_recycles, self.num_sampling_steps, self.num_samples, self.seed, self.path_output_dir,
@@ -211,6 +215,7 @@ class RunOpenDDE(StructurePredictionInputs):
             from runner.batch_inference import preprocess_input
             job_path = preprocess_input(input_json=job_path, out_dir=job_dir, use_msa=True)
 
+        from runner.inference import infer_predict
         runner = self._get_runner()
         runner.configs.input_json_path = job_path
         infer_predict(runner, runner.configs)
