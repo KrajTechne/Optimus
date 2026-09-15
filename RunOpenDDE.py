@@ -49,6 +49,17 @@ _runner_cache: dict = {}
 # be meaningfully cached across cycles where the binder sequence keeps changing.
 _unpaired_msa_cache: dict = {}
 
+# Cache for the SOLO paired-search case only (exactly one chain submitted to
+# run_mmseqs2(use_pairing=True) — the recommended target-only default). Confirmed empirically
+# (2026-09-15, two independent requests against fresh, guaranteed-uncached directories, see
+# opendde_msa_findings_2026-09-14.md section 14) that ColabFold's ticket/pair endpoint performs
+# no actual database search when given a single sequence — ticket/pair needs >=1 other chain to
+# pair against, so a solo submission just returns the query itself, verbatim, as
+# f">101\n{seq}\n". That makes the result a pure deterministic function of the sequence (no real
+# external lookup involved), so it's safe to cache — unlike the >=2-chain case, where the result
+# is a genuine joint-combination search result from OpenDDE's own MSA server and isn't cached.
+_paired_msa_cache: dict = {}
+
 
 @dataclass
 class RunOpenDDE(StructurePredictionInputs):
@@ -74,14 +85,24 @@ class RunOpenDDE(StructurePredictionInputs):
     integrin/VWA-domain-like Mg2+-binding sequence with real UniRef depth). Paired-MSA search
     only has real signal to find when both chains have genuine evolutionary history — i.e.
     homologs across species that coevolved because they physically interact. A de novo
-    sequence has no such history; jointly pairing it with the target's real homologs risks
-    matching the target's genuine hit in some species to a coincidental, biologically
-    meaningless hit for the binder in that species, injecting noise into a channel the model
-    was trained to trust as signal. That's the likely mechanism behind this result, and it's
-    specific to the de novo-binder / natural-target case tested here — it should NOT be
-    assumed to hold for a natural binder (e.g. a real antibody, or two natural obligate
-    partners) where genuine cross-chain coevolutionary signal could exist and inclusion might
-    actually help.
+    sequence has no such history. Confirmed directly (2026-09-15, see
+    opendde_msa_findings_2026-09-14.md section 14): a SOLO submission to ColabFold's
+    ticket/pair endpoint (the target-only/'excluded' case) triggers no real database search at
+    all — it just echoes the query back, since pairing needs a second chain to pair against.
+    So 'excluded' isn't giving the target a clean real search through that channel; it's giving
+    it a no-op there (the target's real evolutionary depth still comes through separately, via
+    its own unpaired MSA). 'included' (jointly submitting binder+target) is the one that
+    actually triggers a real search attempt on both chains — and since the binder has no real
+    homologs, that risks matching the target's genuine hit in some species to a coincidental,
+    biologically meaningless hit for the binder in that species: noise injected into a channel
+    the model was trained to trust as signal, rather than no signal at all. Either framing
+    predicts the same outcome, but the mechanism is "included adds noise" rather than "excluded
+    adds clean signal" — worth being precise about since it changes what to expect for a
+    natural binder: with a real binder, 'included' would have real homologs on both sides to
+    actually pair, so the same noise argument wouldn't apply and inclusion might genuinely
+    help. This is specific to the de novo-binder / natural-target case tested here — it should
+    NOT be assumed to hold for a natural binder (e.g. a real antibody, or two natural obligate
+    partners) where genuine cross-chain coevolutionary signal could exist.
 
     In practice this is largely self-limiting: the '' live-auto-search branch this finding is
     about only fires when a chain has no precomputed MSA handed to it. A de novo sequence has
@@ -114,7 +135,9 @@ class RunOpenDDE(StructurePredictionInputs):
     # False: never fetches a paired MSA at all. Both modes fetch+cache each chain's own
     # UNPAIRED MSA per exact sequence string regardless (see _cached_unpaired_msa_path) — a
     # chain whose sequence doesn't change across cycles (the target) is only searched once
-    # for that part either way; only the paired fetch is what True adds back in per cycle.
+    # for that part either way. The paired fetch is also cached by sequence, but only in the
+    # solo (target-only) case (see _paired_msa_paths/_paired_msa_cache) — a >=2-chain joint
+    # submission is re-fetched every cycle since it's only valid for that exact combination.
 
     @field_validator("num_recycles", "num_sampling_steps")
     @classmethod
@@ -190,11 +213,23 @@ class RunOpenDDE(StructurePredictionInputs):
         requested a search participate — unlike OpenDDE's own preprocess_input()/
         update_seq_msa(), which sweeps every protein chain in the job into the search once any
         one of them is missing a path (see search_msa_every_cycle field docstring). Returns one
-        a3m file path per input sequence, same order as given — not cached, since pairing is a
-        joint-combination result only valid for this exact set of sequences.
+        a3m file path per input sequence, same order as given.
+
+        The solo (len(seqs) == 1) case — the recommended target-only default — is cached by
+        exact sequence string via _paired_msa_cache: confirmed empirically that a lone chain
+        submitted to ticket/pair triggers no real search (ColabFold just echoes the query back
+        verbatim, since pairing needs another chain to pair against), so the result is a pure
+        function of the sequence and safe to reuse across cycles where that chain's sequence is
+        unchanged (typically the target). The >=2-chain case is a genuine joint-combination
+        search result and is deliberately NOT cached, since it's only valid for that exact set
+        of sequences and the non-target chain(s) normally change every cycle.
         """
         msa_dir = os.path.join(self.path_output_dir, ".opendde_msa_cache", "paired")
         os.makedirs(msa_dir, exist_ok=True)
+
+        if len(seqs) == 1 and seqs[0] in _paired_msa_cache:
+            return [_paired_msa_cache[seqs[0]]]
+
         a3m_lines = run_mmseqs2(seqs, msa_dir, use_env=True, use_pairing=True, host_url="https://api.colabfold.com")
         paths = []
         for chain_id, content in zip(chain_ids, a3m_lines):
@@ -202,6 +237,10 @@ class RunOpenDDE(StructurePredictionInputs):
             with open(path, "w") as f:
                 f.write(content)
             paths.append(path)
+
+        if len(seqs) == 1:
+            _paired_msa_cache[seqs[0]] = paths[0]
+
         return paths
 
     def predict_structure(self):
