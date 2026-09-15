@@ -266,7 +266,10 @@ def main():
     parser.add_argument("--search_msa_every_cycle", action = argparse.BooleanOptionalAction, default = True,
                         help = "OpenDDE only. True (default): real paired+unpaired MSA search every cycle via the public ColabFold API — correct but exposed to that server's occasional multi-minute PENDING queueing. False: cheaper cached/unpaired-only path (each unique sequence searched once, no pairing). Use --no-search_msa_every_cycle to disable.")
     parser.add_argument("--msa_options", type = str, default = "",
-                        help = "MSA Options for structure prediction. Expecting comma-separated values of 'empty' or ''. The default runs with everything as 'empty'.")
+                        help = "MSA Options for structure prediction. Expecting comma-separated values of 'empty' or ''. The default runs with everything as 'empty'. "
+                               "For OpenDDE specifically: recommended default is target-only search, e.g. 'empty,' for one binder+target — mark the binder 'empty' and only "
+                               "the target(s) ''. Confirmed via replicate experiment that including the binder in the paired search scores lower on both iptm and actual "
+                               "motif-ligand contact (see opendde_msa_findings_2026-09-14.md section 12).")
     parser.add_argument("--ligands", type = str, default = "",
                         help = "Comma-separated string of ligands")
     parser.add_argument("--filename_output", type = str, default = "refined_designs.csv")
