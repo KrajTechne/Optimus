@@ -39,6 +39,12 @@ OUTPUTS_MOUNT = "/outputs"
 boltz_cache_volume = modal.Volume.from_name("boltz2-weights-cache", create_if_missing=True)
 BOLTZ_CACHE_MOUNT = "/root/.boltz"
 
+# Same idea for OpenDDE's checkpoint + CCD/common cache (opendde's own default
+# OPENDDE_ROOT_DIR when unset is ~/.cache/opendde — see opendde_checkpoint_download_gotchas
+# project notes).
+opendde_cache_volume = modal.Volume.from_name("opendde-weights-cache", create_if_missing=True)
+OPENDDE_CACHE_MOUNT = "/root/.cache/opendde"
+
 
 # ---------------------------------------------------------------------------
 # ESMFold2
@@ -181,16 +187,49 @@ refiner_image = (
     .add_local_python_source(*_SHARED_LOCAL_MODULES, "RunESMFold2", "RunBoltz2", "mmseqs2", "refiner")
 )
 
+# Separate image (not layered on _esmfold2_base_image) — opendde[gpu] pins torch==2.7.1
+# against a cu126 build, which directly conflicts with refiner_image's torch==2.11.0/cu130
+# pin, so the two can't share one environment.
+opendde_image = (
+    modal.Image.debian_slim(python_version="3.12")
+    .pip_install("uv")
+    # Matches the exact install command validated in Colab — uv resolves the correct cu126
+    # torch build via --torch-backend, which plain pip_install() can't express directly.
+    .run_commands("uv pip install --system --torch-backend cu126 'opendde[gpu]'")
+    .pip_install(
+        "huggingface_hub",  # RunOpenDDE._get_runner() uses hf_hub_download for the abag checkpoint
+        "gemmi", "biotite",  # StrucTools.py deps
+        "ipsae",  # StrucTools.calculate_ipSAE CLI
+        "biopython", "ProDy", "ml-collections", "dm-tree",  # LigandMPNN deps
+    )
+    .apt_install("wget")  # get_model_params.sh shells out to wget; not in debian_slim by default
+    .add_local_dir("LigandMPNN", "/root/LigandMPNN", copy=True, ignore=["model_params", "*.pt"])
+    .run_commands("bash /root/LigandMPNN/get_model_params.sh /root/LigandMPNN/model_params")
+    # refiner.py's model imports are lazy per-branch (see load_model_setup_run), so this image
+    # only needs RunOpenDDE mountable, not RunESMFold2/RunBoltz2 — the OpenDDE branch is the
+    # only one that will ever actually execute here.
+    .add_local_python_source(*_SHARED_LOCAL_MODULES, "RunOpenDDE", "mmseqs2", "refiner")
+)
 
+
+# --------------------------------------------------------------------------------------
+# TEMP: swapped from refiner_image to opendde_image to trial OpenDDE's refiner path on
+# Modal (torch==2.7.1/cu126 conflicts with refiner_image's torch==2.11.0/cu130 stack, so
+# they can't share one image — see the lazy-import fix in refiner.py's load_model_setup_run
+# for the same reason). Swap back to refiner_image, volumes={OUTPUTS_MOUNT: outputs_volume,
+# BOLTZ_CACHE_MOUNT: boltz_cache_volume}, and the boltz_cache_volume.commit() below once
+# ESMFold2/Boltz2 refiner runs are needed again.
+# --------------------------------------------------------------------------------------
 @app.function(
-    image=refiner_image,
+    image=opendde_image,
     gpu=GPU_TYPE,
-    volumes={OUTPUTS_MOUNT: outputs_volume, BOLTZ_CACHE_MOUNT: boltz_cache_volume},
+    volumes={OUTPUTS_MOUNT: outputs_volume, OPENDDE_CACHE_MOUNT: opendde_cache_volume},
     timeout=TIMEOUT_SECONDS,
 )
 def run_refiner(model_name: str, seq_binder: str, seq_target: str, design_name: str, num_cycles: int = 5, num_designs: int = 1,
-                ligands: str = "", msa_options: str = "", epitope_residues: str = "", paratope_residues: str = "", fixed_residues: str = "",
-                mpnn_temperature: float = 0.10, filename_output: str = "refined_designs.csv") -> str:
+                num_samples: int = 1, search_msa_every_cycle: bool = True, ligands: str = "", msa_options: str = "",
+                epitope_residues: str = "", paratope_residues: str = "", fixed_residues: str = "", mpnn_temperature: float = 0.10,
+                filename_output: str = "refined_designs.csv") -> str:
     # iterate_over_design_count(args) owns the full per-design-attempt loop (model setup +
     # run_refine_cycle, once per design_count) and the summary CSV write, so it's called directly
     # here rather than duplicating that loop — keeps the CLI (refiner.py main()) and Modal entrypoints
@@ -212,6 +251,8 @@ def run_refiner(model_name: str, seq_binder: str, seq_target: str, design_name: 
         msa_options = msa_options,
         num_designs=num_designs,
         num_cycles=num_cycles,
+        num_samples=num_samples,
+        search_msa_every_cycle=search_msa_every_cycle,
         epitope_residues=epitope_residues,
         paratope_residues=paratope_residues,
         fixed_residues=fixed_residues,
@@ -220,14 +261,15 @@ def run_refiner(model_name: str, seq_binder: str, seq_target: str, design_name: 
     )
     path_design_csv = iterate_over_design_count(args=args)
     outputs_volume.commit()
-    boltz_cache_volume.commit()
+    opendde_cache_volume.commit()
     return path_design_csv
 
 
 @app.local_entrypoint()
 def refiner(model_name: str, seq_binder: str, seq_target: str, design_name: str, num_cycles: int = 5, num_designs: int = 1,
-            ligands: str = "", epitope_residues: str = "", paratope_residues: str = "", fixed_residues: str = "",
-            mpnn_temperature: float = 0.10, msa_options: str = "", filename_output: str = "refined_designs.csv"):
+            num_samples: int = 1, search_msa_every_cycle: bool = True, ligands: str = "", epitope_residues: str = "",
+            paratope_residues: str = "", fixed_residues: str = "", mpnn_temperature: float = 0.10, msa_options: str = "",
+            filename_output: str = "refined_designs.csv"):
     # Passed as keywords (not positionally) so adding/reordering params here can't silently
     # mis-bind against run_refiner's signature the way run_refine_cycle's design_count param did.
     path_design_csv = run_refiner.remote(
@@ -237,6 +279,8 @@ def refiner(model_name: str, seq_binder: str, seq_target: str, design_name: str,
         design_name=design_name,
         num_cycles=num_cycles,
         num_designs=num_designs,
+        num_samples=num_samples,
+        search_msa_every_cycle=search_msa_every_cycle,
         ligands=ligands,
         msa_options = msa_options,
         epitope_residues=epitope_residues,

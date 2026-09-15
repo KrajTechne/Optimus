@@ -5,8 +5,6 @@ import yaml
 import pandas as pd
 import numpy as np
 
-from RunBoltz2 import RunBoltz2
-from RunESMFold2 import RunESMFold2
 from LigandMPNN.wrapper import LigandMPNNWrapper
 from StrucTools import convert_cif_to_pdb
 
@@ -40,15 +38,28 @@ def load_model_setup_run(
         msa_options = msa_options.split(',')
 
     # Structure Prediction Model Initialization
+    # Imported lazily, per branch, rather than at module level: RunOpenDDE pins torch==2.7.1/cu126
+    # while RunESMFold2/RunBoltz2's stack pins torch==2.11.0/cu130 — directly conflicting builds,
+    # so no single environment can have all three frameworks installed at once. Importing only the
+    # one actually needed keeps each model's own Modal image from requiring the others' deps.
     if model_name in ['ESMFold2', 'ESMFold2-Fast']:
-        model = RunESMFold2(design_name = design_name, model_name = model_name, seq_list = seq_list, 
-                            path_output_dir = path_output_dir, ligand_list= ligand_list, 
+        from RunESMFold2 import RunESMFold2
+        model = RunESMFold2(design_name = design_name, model_name = model_name, seq_list = seq_list,
+                            path_output_dir = path_output_dir, ligand_list= ligand_list,
                             desired_epitope_residues = desired_epitope_residues, msa_options= msa_options, **kwargs)
     elif model_name == 'Boltz2':
+        from RunBoltz2 import RunBoltz2
         model = RunBoltz2(design_name = design_name, seq_list = seq_list, path_output_dir = path_output_dir,
                           ligand_list= ligand_list, desired_epitope_residues= desired_epitope_residues, msa_options= msa_options, **kwargs)
+    elif model_name == 'OpenDDE':
+        # msa_options drives RunOpenDDE's per-chain 'empty'/''/'.a3m path' handling same as
+        # Boltz2/ESMFold2 — RunOpenDDE._resolve_use_msa() derives OpenDDE's own job-level
+        # use_msa switch from it internally.
+        from RunOpenDDE import RunOpenDDE
+        model = RunOpenDDE(design_name = design_name, seq_list = seq_list, path_output_dir = path_output_dir,
+                          ligand_list= ligand_list, desired_epitope_residues= desired_epitope_residues, msa_options= msa_options, **kwargs)
     else:
-        raise ValueError(f"Model name {model_name} is not supported. Please choose from ['ESMFold2', 'Boltz2', 'ESMFold2-Fast']")
+        raise ValueError(f"Model name {model_name} is not supported. Please choose from ['ESMFold2', 'Boltz2', 'ESMFold2-Fast', 'OpenDDE']")
 
     # MPNN Wrapper Initialization
     seq_designer = LigandMPNNWrapper(python = "python", run_py = "LigandMPNN/run.py")
@@ -207,9 +218,16 @@ def iterate_over_design_count(args) -> pd.DataFrame:
     """ Run the cycling process for N design attempts and each one has K cycles"""
     results = []
     for design_count in range(args.num_designs):
+        # search_msa_every_cycle is an OpenDDE-only field (RunESMFold2/RunBoltz2 don't have it,
+        # and would reject an unexpected kwarg) — only forwarded when actually running OpenDDE.
+        extra_kwargs = {}
+        if args.model_name == 'OpenDDE':
+            extra_kwargs['search_msa_every_cycle'] = args.search_msa_every_cycle
+
         model, seq_designer = load_model_setup_run(model_name = args.model_name, design_name = args.design_name, seq_binder = args.seq_binder,
                                          seq_target = args.seq_target, path_output_dir = args.path_output_dir, ligands = args.ligands,
-                                         epitope_residues= args.epitope_residues, msa_options = args.msa_options)
+                                         epitope_residues= args.epitope_residues, msa_options = args.msa_options, num_samples = args.num_samples,
+                                         **extra_kwargs)
         
         result = run_refine_cycle(model = model, seq_designer = seq_designer, args = args, design_count= design_count)
         result['run_id'] = design_count
@@ -231,7 +249,7 @@ def main():
                         help = "Binder sequence to refine")
     parser.add_argument("seq_target", type = str, 
                         help = "Target sequence or sequences to use in refinement. If multiple targets, separate with commas (e.g. 'target1,target2').")
-    parser.add_argument("model_name", type = str, choices = ['ESMFold2', 'Boltz2', 'ESMFold2-Fast'], 
+    parser.add_argument("model_name", type = str, choices = ['ESMFold2', 'Boltz2', 'ESMFold2-Fast', 'OpenDDE'],
                         help = "Model to use for refinement.")
     parser.add_argument("design_name", type = str, 
                         help = "Name of the design to refine. This will be used to name the output files.")
@@ -243,8 +261,15 @@ def main():
                         help = "Number of cycles of seq-design -> structure prediction you want to do per design attempt")
     parser.add_argument("--num_designs", type = int, default = 1,
                         help = "Number of designs that you want to generate from initial binder sequence")
+    parser.add_argument("--num_samples", type = int, default = 1,
+                        help = "Number of structure-prediction samples per cycle (best-ranked one is used). Higher can improve accuracy at little/no extra runtime for some models (e.g. OpenDDE) since samples are batched on the GPU — worth checking per model before assuming it's free.")
+    parser.add_argument("--search_msa_every_cycle", action = argparse.BooleanOptionalAction, default = True,
+                        help = "OpenDDE only. True (default): real paired+unpaired MSA search every cycle via the public ColabFold API — correct but exposed to that server's occasional multi-minute PENDING queueing. False: cheaper cached/unpaired-only path (each unique sequence searched once, no pairing). Use --no-search_msa_every_cycle to disable.")
     parser.add_argument("--msa_options", type = str, default = "",
-                        help = "MSA Options for structure prediction. Expecting comma-separated values of 'empty' or ''. The default runs with everything as 'empty'.")
+                        help = "MSA Options for structure prediction. Expecting comma-separated values of 'empty' or ''. The default runs with everything as 'empty'. "
+                               "For OpenDDE specifically: recommended default is target-only search, e.g. 'empty,' for one binder+target — mark the binder 'empty' and only "
+                               "the target(s) ''. Confirmed via replicate experiment that including the binder in the paired search scores lower on both iptm and actual "
+                               "motif-ligand contact (see opendde_msa_findings_2026-09-14.md section 12).")
     parser.add_argument("--ligands", type = str, default = "",
                         help = "Comma-separated string of ligands")
     parser.add_argument("--filename_output", type = str, default = "refined_designs.csv")
