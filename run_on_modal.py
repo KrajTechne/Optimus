@@ -290,3 +290,147 @@ def refiner(model_name: str, seq_binder: str, seq_target: str, design_name: str,
         filename_output=filename_output,
     )
     print(path_design_csv)
+
+
+# ---------------------------------------------------------------------------
+# AlphaFold3 / OpenFold3 (sokrypton/alphafold3 fork — see RunAlphaFold3.py's own docstring for why
+# this fork instead of vanilla google-deepmind/alphafold3: no Docker/HMMER build, MSA via ColabFold's
+# hosted MMseqs2 server instead of local genetic databases, and either weight set loads into the
+# same codebase)
+# ---------------------------------------------------------------------------
+# Separate image (not layered on any existing base) — the fork's published wheel is cp313-only,
+# and jax/dm-haiku/rdkit don't overlap with any other image's stack here.
+alphafold3_image = (
+    modal.Image.debian_slim(python_version="3.13")
+    .apt_install("wget")
+    # Every plain pip dependency this image needs (AF3-of3's own stack + StrucTools.py's deps)
+    # combined into these first two layers, deliberately BEFORE the --no-deps wheel install and
+    # the weight download/conversion steps below — those are the expensive, slow-to-redo layers
+    # (a 2GB+ checkpoint download + conversion), so any future dependency-gap fix here (we've
+    # already hit two: torch, pandas) only invalidates cheap, fast-to-rebuild layers instead of
+    # re-triggering the whole weight pipeline.
+    .pip_install(
+        "jax[cuda12]==0.10.1", "dm-haiku==0.0.17", "rdkit==2025.9.4",
+        "zstandard", "awscli", "tokamax==0.0.11",
+        "gemmi", "biotite", "ipsae", "requests", "tqdm", "pandas",  # StrucTools.py deps
+    )
+    # CPU-only torch, separate call (different index_url): convert_of3_weights.py's
+    # of3_weight_converter.py needs `torch` to load the raw OpenFold3 checkpoint's .pt format
+    # (torch.load) at conversion time — not a notebook install-cell dependency because Colab's
+    # default runtime ships torch pre-installed already; this bare debian_slim image doesn't, so
+    # it has to be explicit here. CPU-only deliberately, not the cu12 build: torch is only used
+    # for this one build-time deserialization step, never at actual inference (that's all
+    # JAX/tokamax) — pulling in torch's own CUDA runtime libs alongside jax[cuda12]'s would only
+    # add image size and version-clash risk for no benefit. (Confirmed empirically 2026-09-16 on
+    # Modal: first build attempt without this failed at `import torch` inside
+    # convert_of3_weights.py with ModuleNotFoundError; second attempt without pandas above failed
+    # at `import pandas as pd` inside StrucTools.py.)
+    .pip_install("torch", index_url="https://download.pytorch.org/whl/cpu")
+    # --no-deps, matching the reference notebook's own install command exactly — a normal
+    # pip_install would also try to resolve/upgrade the wheel's transitive deps, risking a fight
+    # with the jax/dm-haiku pins above.
+    .run_commands(
+        "pip install --no-deps "
+        "'https://github.com/sokrypton/alphafold3/releases/download/v3.1.5/"
+        "alphafold3_open-3.1.5-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl'"
+    )
+    # run_alphafold.py / convert_of3_weights.py aren't part of the wheel — the fork ships them as
+    # standalone scripts fetched separately (confirmed from Sergey_AlphaFold3_of3.ipynb's install
+    # cell). Downloaded to /root so RunAlphaFold3.predict_structure()'s relative "run_alphafold.py"
+    # subprocess call resolves — matches this repo's existing convention of treating /root as the
+    # function's cwd (/root/.boltz, /root/LigandMPNN, /root/.cache/opendde elsewhere in this file).
+    .run_commands(
+        "cd /root && wget -q -O run_alphafold.py "
+        "https://raw.githubusercontent.com/sokrypton/alphafold3/refs/heads/main/run_alphafold.py",
+        "cd /root && wget -q -O convert_of3_weights.py "
+        "https://raw.githubusercontent.com/sokrypton/alphafold3/refs/heads/main/convert_of3_weights.py",
+    )
+    # Chemical-components database build — weight-independent, one-time, safe to bake into the
+    # image layer (matches the official AF3 Dockerfile's own `RUN uv run build_data` build step).
+    .run_commands("cd /root && build_data")
+    # Both weight sets baked in at build time — both are static public downloads with no per-run
+    # mutation or auth quirks (unlike OpenDDE's abag checkpoint), so there's no need for
+    # opendde_cache_volume-style runtime volume plumbing; every function call skips straight to
+    # inference.
+    #   - OpenFold3 (default, RunAlphaFold3(use_af3_weights=False)): raw checkpoint from the
+    #     public, unauthenticated S3 bucket, converted into AF3's native format via the fork's own
+    #     convert_of3_weights.py. Apache 2.0, no commercial-use restriction.
+    #   - Official AlphaFold3 (RunAlphaFold3(use_af3_weights=True)): direct public download, same
+    #     af3.bin.zst URL investigated for the plain-AF3 path — WEIGHTS_TERMS_OF_USE.md's
+    #     non-commercial restriction still applies; only use with the same institutional clearance
+    #     already obtained for that path.
+    .run_commands(
+        "cd /root && aws s3 cp s3://openfold/staging/of3-p2-155k.pt . --no-sign-request",
+        "cd /root && python convert_of3_weights.py --of3_checkpoint of3-p2-155k.pt "
+        "--output_dir af3_converted_weights",
+        "mkdir -p /root/af3_native_weights && cd /root/af3_native_weights && "
+        "wget -q -O af3.bin.zst https://storage.googleapis.com/alphafold3/af3.bin.zst",
+    )
+    .add_local_python_source(*_SHARED_LOCAL_MODULES, "RunAlphaFold3")
+)
+
+
+@app.function(
+    image=alphafold3_image,
+    gpu=GPU_TYPE,
+    volumes={OUTPUTS_MOUNT: outputs_volume},
+    timeout=TIMEOUT_SECONDS,
+)
+def run_alphafold3(
+    use_af3_weights: bool,
+    seq_binder: str = "YPSALDEVLLANLENVLHNLQNNNGVSPAIIQHANKQLQELNANPNVPNLGFPGERPRGFEQLDNEEASVPAEAKEEWEVAWNAWQEEMIEHLELRISVVRAYLGE",
+    seq_target: str = "LIDVVVVCDESNSIYPWDAVKNFLEKFVQGLDIGPTKTQVGLIQYANNPRVVFNLNTYKTKEEMIVATSQTSQYGGDLTNTFGAIQYARKYAYSAASGGRRSATKVMVVVTDGESHDGSMLKAVIDQCNHDNILRFGIAVLGYLNRNALDTKNLIKEIKAIASIPTERYFFNVSDEAALLEKAGTLGEQIFSI",
+    msa_options: str = "empty,",
+    design_name: str = "",
+) -> list[dict]:
+    from RunAlphaFold3 import RunAlphaFold3
+
+    # Defaults match run_esmfold2/run_boltz2's example binder/target, so results stay directly
+    # comparable across all four model integrations unless seq_binder/seq_target are overridden.
+    if design_name == "":
+        design_name = "example_alphafold3_native" if use_af3_weights else "example_openfold3"
+    design = RunAlphaFold3(
+        design_name=design_name,
+        seq_list=[seq_binder, seq_target],
+        msa_options=msa_options.split(","),
+        entity_types=["protein", "protein"],
+        ligand_list=['[Mg+2]'],
+        num_samples=5,
+        use_af3_weights=use_af3_weights,
+        model_dir="/root/af3_native_weights" if use_af3_weights else "/root/af3_converted_weights",
+        path_output_dir=f"{OUTPUTS_MOUNT}/{design_name}",
+    )
+    df_metrics = design.alphafold3_predict_analyze()
+    outputs_volume.commit()
+    return df_metrics.to_dict(orient="records")
+
+
+@app.local_entrypoint()
+def openfold3(
+    seq_binder: str = "YPSALDEVLLANLENVLHNLQNNNGVSPAIIQHANKQLQELNANPNVPNLGFPGERPRGFEQLDNEEASVPAEAKEEWEVAWNAWQEEMIEHLELRISVVRAYLGE",
+    seq_target: str = "LIDVVVVCDESNSIYPWDAVKNFLEKFVQGLDIGPTKTQVGLIQYANNPRVVFNLNTYKTKEEMIVATSQTSQYGGDLTNTFGAIQYARKYAYSAASGGRRSATKVMVVVTDGESHDGSMLKAVIDQCNHDNILRFGIAVLGYLNRNALDTKNLIKEIKAIASIPTERYFFNVSDEAALLEKAGTLGEQIFSI",
+    msa_options: str = "empty,",
+    design_name: str = "",
+):
+    # Passed as keywords, matching run_refiner/refiner's convention — see shell_quoting_comma_args
+    # project notes for why msa_options (a comma-separated string) needs to be quoted as one value
+    # on the command line (PowerShell vs Git Bash tokenize adjacent quote/comma args differently).
+    metrics = run_alphafold3.remote(
+        use_af3_weights=False, seq_binder=seq_binder, seq_target=seq_target,
+        msa_options=msa_options, design_name=design_name,
+    )
+    print(metrics)
+
+
+@app.local_entrypoint()
+def alphafold3_native(
+    seq_binder: str = "YPSALDEVLLANLENVLHNLQNNNGVSPAIIQHANKQLQELNANPNVPNLGFPGERPRGFEQLDNEEASVPAEAKEEWEVAWNAWQEEMIEHLELRISVVRAYLGE",
+    seq_target: str = "LIDVVVVCDESNSIYPWDAVKNFLEKFVQGLDIGPTKTQVGLIQYANNPRVVFNLNTYKTKEEMIVATSQTSQYGGDLTNTFGAIQYARKYAYSAASGGRRSATKVMVVVTDGESHDGSMLKAVIDQCNHDNILRFGIAVLGYLNRNALDTKNLIKEIKAIASIPTERYFFNVSDEAALLEKAGTLGEQIFSI",
+    msa_options: str = "empty,",
+    design_name: str = "",
+):
+    metrics = run_alphafold3.remote(
+        use_af3_weights=True, seq_binder=seq_binder, seq_target=seq_target,
+        msa_options=msa_options, design_name=design_name,
+    )
+    print(metrics)
