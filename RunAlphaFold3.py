@@ -10,11 +10,7 @@ InferenceRunner, so there's no load-once/predict-many pattern available here.
 
 MSA: uses `--use_msa_server` (queries ColabFold's MMseqs2 API directly, same host/endpoints/protocol
 mmseqs2.py already talks to — confirmed from the fork's own src/alphafold3/data/msa_server.py, whose
-docstring says it's "Adapted from the ColabFold run_mmseqs2 implementation"). Deliberately NOT
-pre-populating a solo target-only pairedMsa the way RunOpenDDE does: that was a finding specific to
-OpenDDE's own featurizer (see OpenDDE_MSA_Experiments/opendde_msa_findings_2026-09-14.md section 14),
-and different models are trained differently — whether the same binder-inclusion behavior helps or
-hurts here needs its own experiment once this is working, not an assumption carried over from OpenDDE.
+docstring says it's "Adapted from the ColabFold run_mmseqs2 implementation").
 """
 from __future__ import annotations
 
@@ -68,14 +64,10 @@ class RunAlphaFold3(StructurePredictionInputs):
     """ Inputs for running AlphaFold3 (sokrypton/alphafold3 fork) structure prediction. """
 
     use_af3_weights: bool = Field(default=False)
-    # False (default): use OpenFold3's own weights (AlQuraishi Lab, Apache 2.0 — no commercial-use
-    # restriction on the code OR the weights, and the notebook's own docs state model outputs
-    # produced with these weights aren't subject to DeepMind's AF3 Output Terms of Use either).
-    # True: use the official DeepMind AlphaFold3 weights instead (same af3.bin.zst download
-    # investigated for the plain-AF3 path; subject to the AF3 weights Terms of Use non-commercial
-    # restriction — only turn this on with the same institutional clearance already obtained for
-    # that path). Either way, model_dir is expected to already exist on disk (populated once by
-    # the Modal image/volume setup, not downloaded per-call here — same division of responsibility
+    # False (default): use OpenFold3's own weights (AlQuraishi Lab, Apache 2.0)
+    # True: use the official DeepMind AlphaFold3 weights instead
+    # model_dir is expected to already exist on disk (populated once by the Modal image/volume setup, 
+    # not downloaded per-call here — same division of responsibility
     # as RunBoltz2/get_model_params.sh baking LigandMPNN's weights into the image ahead of time).
     model_dir: str = Field(default="af3_converted_weights")
     # Directory run_alphafold.py's --model_dir points at. Default matches the reference notebook's
@@ -97,6 +89,7 @@ class RunAlphaFold3(StructurePredictionInputs):
         Build the AlphaFold3 job JSON, run structure prediction via `run_alphafold.py` (subprocess,
         same pattern as RunBoltz2's `boltz predict` CLI call — this fork has no in-process runner).
         Same no-arg call shape as RunESMFold2/RunBoltz2/RunOpenDDE's predict_structure().
+        Tested for structure prediction of proteins and ligands (9/16/2026)
 
         Returns:
             (None, job): None in the first slot (no in-memory structure object, same as RunBoltz2/
@@ -110,7 +103,6 @@ class RunAlphaFold3(StructurePredictionInputs):
         if self.msa_options == []:
             self.msa_options = ['empty'] * len(self.seq_list)
 
-        entity_key = {"protein": "protein", "dna": "dna", "rna": "rna"}
         sequences = []
         for index in range(len(self.seq_list)):
             entity_dict = {"id": chains[index], "sequence": self.seq_list[index]}
@@ -127,15 +119,12 @@ class RunAlphaFold3(StructurePredictionInputs):
                 if self.entity_types[index] == "protein":
                     entity_dict["pairedMsa"] = ""
             elif ".a3m" in option:
-                # NOTE: unverified against this fork specifically — vanilla AlphaFold3's own input
-                # schema documents unpairedMsaPath/pairedMsaPath as valid keys (file path, not
-                # inline string), and this fork's job JSON reader is the same AlphaFold3 input
-                # parser, so this should work, but hasn't been confirmed end-to-end yet.
+                # Untested, but should work based on documentation
                 entity_dict["unpairedMsaPath"] = option
-            # option == "": leave unpairedMsa/pairedMsa entirely unset (both None) so
+            # option == "": leave unpairedMsa/pairedMsa entirely unset (all None) so
             # --use_msa_server's fill_missing_msas() auto-fetches this chain from ColabFold.
 
-            sequences.append({entity_key[self.entity_types[index]]: entity_dict})
+            sequences.append({self.entity_types[index]: entity_dict})
 
         if self.ligand_list != []:
             for index, lig in enumerate(self.ligand_list):
@@ -210,11 +199,7 @@ class RunAlphaFold3(StructurePredictionInputs):
         """
         metrics = {"design_id": f"{self.design_name}_{model_id}", "design_name": self.design_name, "model_id": model_id}
 
-        # 1. Locate this sample's output directory. Confirmed from the reference notebook's own
-        # collect_models()/load_pae() helpers that per-sample files live under
-        # {job_dir}/seed-{seed}_sample-{sample}/ and are matched via glob rather than one fixed
-        # filename (the notebook itself globs defensively) — mirroring that here rather than
-        # asserting an exact filename that hasn't been confirmed end-to-end.
+        # 1. Locate this sample's output directory. 
         job_dir = os.path.join(self.path_output_dir, self.design_name)
         sample_dir = os.path.join(job_dir, f"seed-{self.seed}_sample-{model_id}")
 
@@ -224,11 +209,8 @@ class RunAlphaFold3(StructurePredictionInputs):
             raise FileNotFoundError(f"No predicted structure (.cif) found in {sample_dir}")
         path_structure_af3 = cif_matches[0]
 
-        # 2. Per-sample confidence JSON (non-summary — contains the full pae matrix) + summary
-        # JSON (ptm/iptm/ranking_score) — both confirmed present per-sample from the notebook's
-        # load_pae()/plots cells, though summary is only confirmed at the job level there
-        # (job_dir/{design_name}_summary_confidences.json); fall back to that if no per-sample
-        # summary file is found.
+        # 2. Per-sample keys: 'atom_chain_ids', 'atom_plddts', 'contact_probs', 'pae', 'token_chain_ids', 'token_res_ids'
+        # Summary Keys: 'chain_ids', 'chain_iptm', 'chain_pair_iptm', 'chain_pair_pae_min', 'chain_ptm', 'fraction_disordered', 'has_clash', 'iptm', 'ptm', 'ranking_score'
         conf_matches = [p for p in glob.glob(os.path.join(sample_dir, "*_confidences.json"))
                          if "summary" not in os.path.basename(p)]
         if not conf_matches:
@@ -252,16 +234,8 @@ class RunAlphaFold3(StructurePredictionInputs):
         # which needed pulling out of a separate full_data.json under a different key) — re-save
         # as .npz with key "pae" to match calculate_ipSAE's expected format regardless.
         #
-        # Filename matters here, not just content: StrucTools.calculate_ipSAE derives the `ipsae`
-        # CLI's own output filename via pae_file.replace(".npz", f"_{thr}_{thr}.txt")
-        # .replace("pae_", "") — which only works if that transform reconstructs the *structure*
-        # file's basename, since that's what `ipsae` actually names its output after (confirmed
-        # empirically 2026-09-16 on Modal: the real output was
-        # "{structure_basename}_10_15.txt", not "{design_name}_sample_{model_id}_10_15.txt" as a
-        # PAE-npz-derived name had assumed). RunOpenDDE's own pae filename happens to satisfy this
-        # by construction; build ours the same way — derived from the actual matched structure
-        # filename rather than independently from design_name/model_id, so it can't drift out of
-        # sync with whatever AF3-of3's own naming convention actually is.
+        # Filename matters here, not just content:
+        # Naming of pae file for ease of extraction when calculating ipSAE scores
         structure_basename = os.path.splitext(os.path.basename(path_structure_af3))[0]
         path_pae = os.path.join(sample_dir, f"pae_{structure_basename}.npz")
         pae_matrix = np.array(confidence_metrics["pae"])
