@@ -11,6 +11,15 @@ InferenceRunner, so there's no load-once/predict-many pattern available here.
 MSA: uses `--use_msa_server` (queries ColabFold's MMseqs2 API directly, same host/endpoints/protocol
 mmseqs2.py already talks to — confirmed from the fork's own src/alphafold3/data/msa_server.py, whose
 docstring says it's "Adapted from the ColabFold run_mmseqs2 implementation").
+
+Recommended MSA Options/Use:
+- Native AlphaFold3 handles target-only MSA generation well — treat it as safe to use as the
+  default across binders; this experiment found no row where it made a real difference.
+- OpenFold3 does reliable structure predictions with target-only MSA generation most of the time, 
+  but is not guaranteed Treat target-only as the default for OpenFold3 too, but for a binder that matters, 
+  validate it against a real both-binder-and-target-MSA run 
+  (with enough samples to see the range, not just one) before trusting the target-only result on its own.
+
 """
 from __future__ import annotations
 
