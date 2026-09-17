@@ -79,9 +79,9 @@ refiner_esmfold2_boltz2_image = (
     # needs the file baked into the image layer, not only mounted at function runtime.
     .add_local_dir("LigandMPNN", "/root/LigandMPNN", copy=True, ignore=["model_params", "*.pt"])
     .run_commands("bash /root/LigandMPNN/get_model_params.sh /root/LigandMPNN/model_params")
-    # refiner.py imports RunBoltz2 unconditionally at module level even though this image only
-    # exercises the ESMFold2 path, so it needs to be mountable too (RunBoltz2.py itself only imports
-    # lightweight stdlib/pydantic/pandas at module level — no `boltz` package import needed just to import it).
+    # refiner.py's model imports are lazy, per-branch (see load_model_setup_run) — but this one
+    # image serves run_refiner_esm_boltz for BOTH model_name="ESMFold2" and "Boltz2", so RunBoltz2
+    # genuinely needs to be mountable here, not just imported-but-unused.
     .add_local_python_source(*_SHARED_LOCAL_MODULES, "RunESMFold2", "RunBoltz2", "mmseqs2", "refiner")
 )
 
@@ -241,7 +241,7 @@ alphafold3_image = (
         "zstandard", "awscli", "tokamax==0.0.11",
         "gemmi", "biotite", "ipsae", "requests", "tqdm", "pandas",  # StrucTools.py deps
     )
-    # CPU-only torch solely for converting OF2 weights into format compatabile with AF3 model architecture
+    # CPU-only torch solely for converting OpenFold3 weights into a format compatible with AF3 model architecture
     .pip_install("torch", index_url="https://download.pytorch.org/whl/cpu")
     .run_commands(
         "pip install --no-deps "
