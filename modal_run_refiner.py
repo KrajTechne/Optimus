@@ -1,20 +1,16 @@
 """
-run_on_modal.py — Run RunESMFold2 or RunBoltz2 structure prediction on Modal.
+modal_run_refiner.py — Run Iterative Structure Prediction & Seq Generation for N-Cycles
 
-ESMFold2 and Boltz2 have non-overlapping dependencies (the `esm` package +
-the mmseqs2 binary for ESMFold2's MSA generation vs. the `boltz` package
-for Boltz2), so each gets its own Modal image + function rather than one
-shared image.
+Available Structure Prediction Models for Refinement:
+- OpenDDE (Fast, with runner caching)
+- ESMFold2 (Fast, with model caching)
+- ESMFold2-Fast (Fastest but no MSAs allowed as input, with model_caching)
+- Boltz2 (Slow, no model or runner caching)
 
-Requires `pip install modal` locally and `modal setup` (one-time auth) —
-these run on your machine to talk to Modal, not inside this repo's venv.
+Validation Models (External Models not used in Refinement, but for validation of designs via separate, distinct structure prediction models):
+- OpenFold3
+- AlphaFold3
 
-Usage:
-    modal run run_on_modal.py::esmfold2
-    modal run run_on_modal.py::boltz2
-
-Edit the hardcoded example inputs inside `run_esmfold2` / `run_boltz2`
-below to point at your actual design.
 """
 from types import SimpleNamespace
 
@@ -40,25 +36,16 @@ boltz_cache_volume = modal.Volume.from_name("boltz2-weights-cache", create_if_mi
 BOLTZ_CACHE_MOUNT = "/root/.boltz"
 
 # Same idea for OpenDDE's checkpoint + CCD/common cache (opendde's own default
-# OPENDDE_ROOT_DIR when unset is ~/.cache/opendde — see opendde_checkpoint_download_gotchas
-# project notes).
+# OPENDDE_ROOT_DIR when unset is ~/.cache/opendde
 opendde_cache_volume = modal.Volume.from_name("opendde-weights-cache", create_if_missing=True)
 OPENDDE_CACHE_MOUNT = "/root/.cache/opendde"
 
 
 # ---------------------------------------------------------------------------
-# ESMFold2
+# Images: ESMFold2
 # ---------------------------------------------------------------------------
-# Pip-install-only base, deliberately with no add_local_* calls — Modal requires add_local_* to be
-# the last step(s) in an image's build chain, so this stays reusable as a base for other images
-# (e.g. refiner_image below) that need to layer more build steps on top before mounting local files.
 _esmfold2_base_image = (
     modal.Image.debian_slim(python_version="3.12")
-    # mmseqs2.py's generate_msa() calls a remote MSA server over HTTP
-    # (ColabFold's run_mmseqs2, default host_url=https://api.colabfold.com)
-    # rather than a local mmseqs2 binary, so no binary install is needed —
-    # just the requests/tqdm packages it imports, and network egress to
-    # whatever host_url you point it at.
     .pip_install(
         "torch==2.11.0",
         "torchvision==0.26.0",
@@ -77,99 +64,10 @@ _esmfold2_base_image = (
     # gemmi/biotite are needed by StrucTools.py (imported via StructurePredictionInputs.py)
     .pip_install("pydantic", "pyyaml", "pandas", "numpy", "requests", "tqdm", "gemmi", "biotite")
 )
-
-esmfold2_image = _esmfold2_base_image.add_local_python_source(*_SHARED_LOCAL_MODULES, "RunESMFold2", "mmseqs2")
-
-
-@app.function(
-    image=esmfold2_image,
-    gpu=GPU_TYPE,
-    volumes={OUTPUTS_MOUNT: outputs_volume},
-    timeout=TIMEOUT_SECONDS,
-)
-def run_esmfold2() -> list[dict]:
-    from RunESMFold2 import RunESMFold2
-
-    # --- Hardcoded example design — edit as needed ---
-    design = RunESMFold2(
-        design_name="example_esmfold2_design",
-        seq_list=["YPSALDEVLLANLENVLHNLQNNNGVSPAIIQHANKQLQELNANPNVPNLGFPGERPRGFEQLDNEEASVPAEAKEEWEVAWNAWQEEMIEHLELRISVVRAYLGE",
-                  "LIDVVVVCDESNSIYPWDAVKNFLEKFVQGLDIGPTKTQVGLIQYANNPRVVFNLNTYKTKEEMIVATSQTSQYGGDLTNTFGAIQYARKYAYSAASGGRRSATKVMVVVTDGESHDGSMLKAVIDQCNHDNILRFGIAVLGYLNRNALDTKNLIKEIKAIASIPTERYFFNVSDEAALLEKAGTLGEQIFSI"
-                  ],
-        msa_options=["empty", ""],
-        entity_types=["protein", "protein"],
-        ligand_list=['[Mg+2]'],
-        path_output_dir=f"{OUTPUTS_MOUNT}/example_esmfold2_design",
-    )
-    df_metrics = design.predict_analyze()
-    outputs_volume.commit()
-    return df_metrics.to_dict(orient="records")
-
-
-@app.local_entrypoint()
-def esmfold2():
-    metrics = run_esmfold2.remote()
-    print(metrics)
-
-
 # ---------------------------------------------------------------------------
-# Boltz2
+# Images: ESMFold2 & Boltz2 with Ligand/Soluble/ProteinMPNN for Refinement
 # ---------------------------------------------------------------------------
-boltz2_image = (
-    modal.Image.debian_slim(python_version="3.12")
-    .pip_install(
-        "pydantic",
-        "pyyaml",
-        "pandas",
-        "boltz",  # provides the `boltz` CLI that RunBoltz2.predict_structure shells out to
-        # gemmi/biotite are needed by StrucTools.py (imported via StructurePredictionInputs.py);
-        # gemmi also comes in transitively via boltz, but pin it explicitly to not rely on that.
-        "gemmi",
-        "biotite",
-        "ipsae",  # provides the `ipsae` CLI that StrucTools.calculate_ipSAE shells out to
-    )
-    .add_local_python_source(*_SHARED_LOCAL_MODULES, "RunBoltz2")
-)
-
-
-@app.function(
-    image=boltz2_image,
-    gpu=GPU_TYPE,
-    volumes={OUTPUTS_MOUNT: outputs_volume, BOLTZ_CACHE_MOUNT: boltz_cache_volume},
-    timeout=TIMEOUT_SECONDS,
-)
-def run_boltz2() -> list[dict]:
-    from RunBoltz2 import RunBoltz2
-
-    # --- Hardcoded example design — edit as needed ---
-    design = RunBoltz2(
-        design_name="example_boltz2_design",
-        seq_list=["YPSALDEVLLANLENVLHNLQNNNGVSPAIIQHANKQLQELNANPNVPNLGFPGERPRGFEQLDNEEASVPAEAKEEWEVAWNAWQEEMIEHLELRISVVRAYLGE",
-                  "LIDVVVVCDESNSIYPWDAVKNFLEKFVQGLDIGPTKTQVGLIQYANNPRVVFNLNTYKTKEEMIVATSQTSQYGGDLTNTFGAIQYARKYAYSAASGGRRSATKVMVVVTDGESHDGSMLKAVIDQCNHDNILRFGIAVLGYLNRNALDTKNLIKEIKAIASIPTERYFFNVSDEAALLEKAGTLGEQIFSI"],
-        msa_options=["empty", ""],
-        entity_types=["protein", "protein"],
-        ligand_list = ['[Mg+2]'],
-        # cuequivariance_ops_torch (the compiled kernels use_kernels=True needs)
-        # isn't installed — disable kernels rather than chase that dependency.
-        use_kernels=False,
-        path_output_dir=f"{OUTPUTS_MOUNT}/example_boltz2_design",
-    )
-    df_metrics = design.boltz_predict_analyze()
-    outputs_volume.commit()
-    boltz_cache_volume.commit()
-    return df_metrics.to_dict(orient="records")
-
-
-@app.local_entrypoint()
-def boltz2():
-    metrics = run_boltz2.remote()
-    print(metrics)
-
-
-# ---------------------------------------------------------------------------
-# Refiner (ESMFold2 structure prediction + LigandMPNN/SolubleMPNN sequence design, cycled)
-# ---------------------------------------------------------------------------
-refiner_image = (
+refiner_esmfold2_boltz2_image = (
     _esmfold2_base_image
     # LigandMPNN's own deps beyond what the base image already provides (torch, numpy, pandas, ...).
     # Installed unpinned rather than matching LigandMPNN/requirements.txt's old pins, since those were
@@ -187,14 +85,10 @@ refiner_image = (
     .add_local_python_source(*_SHARED_LOCAL_MODULES, "RunESMFold2", "RunBoltz2", "mmseqs2", "refiner")
 )
 
-# Separate image (not layered on _esmfold2_base_image) — opendde[gpu] pins torch==2.7.1
-# against a cu126 build, which directly conflicts with refiner_image's torch==2.11.0/cu130
-# pin, so the two can't share one environment.
-opendde_image = (
+# Incompatabile torch dependencies between OpenDDE and ESMFold2: Specifically in pytorch version specs
+refiner_opendde_image = (
     modal.Image.debian_slim(python_version="3.12")
     .pip_install("uv")
-    # Matches the exact install command validated in Colab — uv resolves the correct cu126
-    # torch build via --torch-backend, which plain pip_install() can't express directly.
     .run_commands("uv pip install --system --torch-backend cu126 'opendde[gpu]'")
     .pip_install(
         "huggingface_hub",  # RunOpenDDE._get_runner() uses hf_hub_download for the abag checkpoint
@@ -212,29 +106,25 @@ opendde_image = (
 )
 
 
-# --------------------------------------------------------------------------------------
-# TEMP: swapped from refiner_image to opendde_image to trial OpenDDE's refiner path on
-# Modal (torch==2.7.1/cu126 conflicts with refiner_image's torch==2.11.0/cu130 stack, so
-# they can't share one image — see the lazy-import fix in refiner.py's load_model_setup_run
-# for the same reason). Swap back to refiner_image, volumes={OUTPUTS_MOUNT: outputs_volume,
-# BOLTZ_CACHE_MOUNT: boltz_cache_volume}, and the boltz_cache_volume.commit() below once
-# ESMFold2/Boltz2 refiner runs are needed again.
-# --------------------------------------------------------------------------------------
-@app.function(
-    image=opendde_image,
-    gpu=GPU_TYPE,
-    volumes={OUTPUTS_MOUNT: outputs_volume, OPENDDE_CACHE_MOUNT: opendde_cache_volume},
-    timeout=TIMEOUT_SECONDS,
-)
-def run_refiner(model_name: str, seq_binder: str, seq_target: str, design_name: str, num_cycles: int = 5, num_designs: int = 1,
-                num_samples: int = 1, search_msa_every_cycle: bool = True, ligands: str = "", msa_options: str = "",
-                epitope_residues: str = "", paratope_residues: str = "", fixed_residues: str = "", mpnn_temperature: float = 0.10,
-                filename_output: str = "refined_designs.csv") -> str:
-    # iterate_over_design_count(args) owns the full per-design-attempt loop (model setup +
-    # run_refine_cycle, once per design_count) and the summary CSV write, so it's called directly
-    # here rather than duplicating that loop — keeps the CLI (refiner.py main()) and Modal entrypoints
-    # on one code path instead of two that can drift out of sync (as run_refine_cycle's design_count
-    # param did against this function before this fix).
+def _run_refiner_body(model_name: str, seq_binder: str, seq_target: str, design_name: str, num_cycles: int, num_designs: int,
+                       num_samples: int, search_msa_every_cycle: bool, ligands: str, msa_options: str,
+                       epitope_residues: str, paratope_residues: str, fixed_residues: str, mpnn_temperature: float,
+                       filename_output: str) -> str:
+    """
+    Shared body for both run_refiner_esm_boltz and run_refiner_opendde — Modal binds a function's
+    image at decoration time, not call time, so there's no way for one @app.function to pick its
+    image based on a runtime model_name argument. Instead each model family gets its own
+    @app.function (bound to the image its dependencies actually need), both calling this same
+    plain module-level helper so the two don't drift out of sync with each other. Runs inside the
+    remote container either way (this module is imported there via add_local_python_source), just
+    never itself decorated with @app.function.
+
+    iterate_over_design_count(args) owns the full per-design-attempt loop (model setup +
+    run_refine_cycle, once per design_count) and the summary CSV write, so it's called directly
+    here rather than duplicating that loop — keeps the CLI (refiner.py main()) and Modal entrypoints
+    on one code path instead of two that can drift out of sync (as run_refine_cycle's design_count
+    param did against this function before an earlier fix).
+    """
     from refiner import iterate_over_design_count
 
     path_output_dir = f"{OUTPUTS_MOUNT}/{design_name}"
@@ -248,7 +138,7 @@ def run_refiner(model_name: str, seq_binder: str, seq_target: str, design_name: 
         seq_target=seq_target,
         path_output_dir=path_output_dir,
         ligands=ligands,
-        msa_options = msa_options,
+        msa_options=msa_options,
         num_designs=num_designs,
         num_cycles=num_cycles,
         num_samples=num_samples,
@@ -259,7 +149,50 @@ def run_refiner(model_name: str, seq_binder: str, seq_target: str, design_name: 
         mpnn_temperature=mpnn_temperature,
         filename_output=filename_output,
     )
-    path_design_csv = iterate_over_design_count(args=args)
+    return iterate_over_design_count(args=args)
+
+
+@app.function(
+    image=refiner_esmfold2_boltz2_image,
+    gpu=GPU_TYPE,
+    volumes={OUTPUTS_MOUNT: outputs_volume, BOLTZ_CACHE_MOUNT: boltz_cache_volume},
+    timeout=TIMEOUT_SECONDS,
+)
+def run_refiner_esm_boltz(model_name: str, seq_binder: str, seq_target: str, design_name: str, num_cycles: int = 5, num_designs: int = 1,
+                           num_samples: int = 1, search_msa_every_cycle: bool = True, ligands: str = "", msa_options: str = "",
+                           epitope_residues: str = "", paratope_residues: str = "", fixed_residues: str = "", mpnn_temperature: float = 0.10,
+                           filename_output: str = "refined_designs.csv") -> str:
+    """model_name in {'ESMFold2', 'ESMFold2-Fast', 'Boltz2'} — see refiner()'s dispatch below."""
+    path_design_csv = _run_refiner_body(
+        model_name=model_name, seq_binder=seq_binder, seq_target=seq_target, design_name=design_name,
+        num_cycles=num_cycles, num_designs=num_designs, num_samples=num_samples,
+        search_msa_every_cycle=search_msa_every_cycle, ligands=ligands, msa_options=msa_options,
+        epitope_residues=epitope_residues, paratope_residues=paratope_residues, fixed_residues=fixed_residues,
+        mpnn_temperature=mpnn_temperature, filename_output=filename_output,
+    )
+    outputs_volume.commit()
+    boltz_cache_volume.commit()
+    return path_design_csv
+
+
+@app.function(
+    image=refiner_opendde_image,
+    gpu=GPU_TYPE,
+    volumes={OUTPUTS_MOUNT: outputs_volume, OPENDDE_CACHE_MOUNT: opendde_cache_volume},
+    timeout=TIMEOUT_SECONDS,
+)
+def run_refiner_opendde(model_name: str, seq_binder: str, seq_target: str, design_name: str, num_cycles: int = 5, num_designs: int = 1,
+                         num_samples: int = 1, search_msa_every_cycle: bool = True, ligands: str = "", msa_options: str = "",
+                         epitope_residues: str = "", paratope_residues: str = "", fixed_residues: str = "", mpnn_temperature: float = 0.10,
+                         filename_output: str = "refined_designs.csv") -> str:
+    """model_name == 'OpenDDE' — see refiner()'s dispatch below."""
+    path_design_csv = _run_refiner_body(
+        model_name=model_name, seq_binder=seq_binder, seq_target=seq_target, design_name=design_name,
+        num_cycles=num_cycles, num_designs=num_designs, num_samples=num_samples,
+        search_msa_every_cycle=search_msa_every_cycle, ligands=ligands, msa_options=msa_options,
+        epitope_residues=epitope_residues, paratope_residues=paratope_residues, fixed_residues=fixed_residues,
+        mpnn_temperature=mpnn_temperature, filename_output=filename_output,
+    )
     outputs_volume.commit()
     opendde_cache_volume.commit()
     return path_design_csv
@@ -270,9 +203,9 @@ def refiner(model_name: str, seq_binder: str, seq_target: str, design_name: str,
             num_samples: int = 1, search_msa_every_cycle: bool = True, ligands: str = "", epitope_residues: str = "",
             paratope_residues: str = "", fixed_residues: str = "", mpnn_temperature: float = 0.10, msa_options: str = "",
             filename_output: str = "refined_designs.csv"):
-    # Passed as keywords (not positionally) so adding/reordering params here can't silently
-    # mis-bind against run_refiner's signature the way run_refine_cycle's design_count param did.
-    path_design_csv = run_refiner.remote(
+    # 1. Pick Structure Prediction Model of Interest for Refinement & Use its respective setup image
+    run_fn = run_refiner_opendde if model_name == "OpenDDE" else run_refiner_esm_boltz
+    path_design_csv = run_fn.remote(
         model_name=model_name,
         seq_binder=seq_binder,
         seq_target=seq_target,
@@ -282,7 +215,7 @@ def refiner(model_name: str, seq_binder: str, seq_target: str, design_name: str,
         num_samples=num_samples,
         search_msa_every_cycle=search_msa_every_cycle,
         ligands=ligands,
-        msa_options = msa_options,
+        msa_options=msa_options,
         epitope_residues=epitope_residues,
         paratope_residues=paratope_residues,
         fixed_residues=fixed_residues,
@@ -303,32 +236,13 @@ def refiner(model_name: str, seq_binder: str, seq_target: str, design_name: str,
 alphafold3_image = (
     modal.Image.debian_slim(python_version="3.13")
     .apt_install("wget")
-    # Every plain pip dependency this image needs (AF3-of3's own stack + StrucTools.py's deps)
-    # combined into these first two layers, deliberately BEFORE the --no-deps wheel install and
-    # the weight download/conversion steps below — those are the expensive, slow-to-redo layers
-    # (a 2GB+ checkpoint download + conversion), so any future dependency-gap fix here (we've
-    # already hit two: torch, pandas) only invalidates cheap, fast-to-rebuild layers instead of
-    # re-triggering the whole weight pipeline.
     .pip_install(
         "jax[cuda12]==0.10.1", "dm-haiku==0.0.17", "rdkit==2025.9.4",
         "zstandard", "awscli", "tokamax==0.0.11",
         "gemmi", "biotite", "ipsae", "requests", "tqdm", "pandas",  # StrucTools.py deps
     )
-    # CPU-only torch, separate call (different index_url): convert_of3_weights.py's
-    # of3_weight_converter.py needs `torch` to load the raw OpenFold3 checkpoint's .pt format
-    # (torch.load) at conversion time — not a notebook install-cell dependency because Colab's
-    # default runtime ships torch pre-installed already; this bare debian_slim image doesn't, so
-    # it has to be explicit here. CPU-only deliberately, not the cu12 build: torch is only used
-    # for this one build-time deserialization step, never at actual inference (that's all
-    # JAX/tokamax) — pulling in torch's own CUDA runtime libs alongside jax[cuda12]'s would only
-    # add image size and version-clash risk for no benefit. (Confirmed empirically 2026-09-16 on
-    # Modal: first build attempt without this failed at `import torch` inside
-    # convert_of3_weights.py with ModuleNotFoundError; second attempt without pandas above failed
-    # at `import pandas as pd` inside StrucTools.py.)
+    # CPU-only torch solely for converting OF2 weights into format compatabile with AF3 model architecture
     .pip_install("torch", index_url="https://download.pytorch.org/whl/cpu")
-    # --no-deps, matching the reference notebook's own install command exactly — a normal
-    # pip_install would also try to resolve/upgrade the wheel's transitive deps, risking a fight
-    # with the jax/dm-haiku pins above.
     .run_commands(
         "pip install --no-deps "
         "'https://github.com/sokrypton/alphafold3/releases/download/v3.1.5/"
