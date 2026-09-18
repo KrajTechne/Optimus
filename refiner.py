@@ -4,9 +4,26 @@ import shutil
 import yaml
 import pandas as pd
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")  # headless (no display) in a Modal container — must be set before pyplot import
+import matplotlib.pyplot as plt
 
 from LigandMPNN.wrapper import LigandMPNNWrapper
 from StrucTools import convert_cif_to_pdb
+
+_PLOT_METRICS = {'plddt': {'ymin' : 0.0, "ymax": 1.0, 'color' : "#FF7F11"},
+                 'ptm': {'ymin' : 0.0,  'ymax': 1.0, 'color' : "#E94560"},
+                 'iptm': {'ymin' : 0.0, 'ymax': 1.0, 'color' : "#9B59B6" },
+                 'ipsae_min' : {'ymin' : 0.0, 'ymax' : 1.0, 'color' : "#2ECC71"},
+}
+
+# --threshold's actual default depends on --filter_metric (argparse can't express a default
+# conditioned on another argument) — main() and Modal's _run_refiner_body both leave --threshold
+# unset (None) and call resolve_threshold() to fill it in from here consistently.
+_DEFAULT_THRESHOLDS = {"iptm": 0.8, "ipsae_min": 0.61}
+
+def resolve_threshold(filter_metric: str, threshold) -> float:
+    return _DEFAULT_THRESHOLDS[filter_metric] if threshold is None else threshold
 
 def load_model_setup_run(
         model_name: str, 
@@ -114,6 +131,38 @@ def binder_binds_contacts(metrics, target_chain, epitope_residues, paratope_resi
 
     return paratope_ok and epitope_ok
 
+
+def _normalize_plddt_key(metrics: dict) -> dict:
+    """
+    RunESMFold2 (holo)/RunBoltz2 key their mean-pLDDT-across-the-structure value as
+    "complex_plddt"; RunOpenDDE keys the same quantity (confirmed from its own source,
+    opendde/model/sample_confidence.py: `summary_confidence["plddt"] = atom_plddt.mean(dim=-1)
+    * 100`) as "plddt" directly. Same value, different key — not two different metrics, so this
+    normalizes onto "plddt" (the more semantically correct name, since pLDDT at the structure
+    level is already a mean by definition, not a distinct "mean_plddt" quantity) rather than
+    branching on model_name wherever this gets consumed later (e.g. the cycle-history plotting).
+    """
+    # Re-assign plddt to complex_plddt if provided as an option
+    if "plddt" not in metrics and "complex_plddt" in metrics:
+        metrics["plddt"] = metrics["complex_plddt"]
+    # Normalize plddt numeric range
+    if metrics['plddt'] > 1:
+        metrics['plddt'] = metrics['plddt'] / 100
+    return metrics
+
+
+def _best_structure(predicted_structure):
+    """
+    RunESMFold2.predict_structure() returns a list of structures (one per diffusion sample)
+    when num_samples > 1, pre-ranked by ESMFold2 itself — so the first entry is always its best
+    sample, and analyze_structure() (which expects a single structure, not a list) should be
+    called on that one. RunOpenDDE/RunBoltz2 always return None here regardless of num_samples
+    (they read results back from disk instead — see their own predict_structure() docstrings),
+    so this is a no-op for them.
+    """
+    return predicted_structure[0] if isinstance(predicted_structure, list) else predicted_structure
+
+
 def run_refine_cycle(model, seq_designer, args, design_count):
     """ 
     Cycle 0: Validate Predicted Structure of the inputs passes initial contact check
@@ -140,8 +189,9 @@ def run_refine_cycle(model, seq_designer, args, design_count):
 
     # ---- Cycle 0: Predict structure for the initial (un-redesigned) sequence and validate it passes the contact check ----
     predicted_structure, _ = model.predict_structure()
+    predicted_structure = _best_structure(predicted_structure)
     path_structure_cycle_0 = os.path.join(path_design_specific_folder, f"{model.design_name}_cycle_0.cif")
-    metrics_cycle_0 = model.analyze_structure(predicted_structure, path_structure = path_structure_cycle_0)
+    metrics_cycle_0 = _normalize_plddt_key(model.analyze_structure(predicted_structure, path_structure = path_structure_cycle_0))
     path_pdb_cycle_0 = convert_cif_to_pdb(path_structure_cycle_0)
 
     contact_check_res_cycle_0 = [
@@ -150,18 +200,16 @@ def run_refine_cycle(model, seq_designer, args, design_count):
         for target_chain in target_chains.split(",")
     ]
     contact_check_passed_cycle_0 = all(contact_check_res_cycle_0)
-    iptm_cycle_0 = metrics_cycle_0["iptm"]
-    print(f"Cycle 0: iptm={iptm_cycle_0:.4f}, contact_check_passed={contact_check_passed_cycle_0}")
+    print(f"Cycle 0: {args.filter_metric}={metrics_cycle_0[args.filter_metric]:.4f}, contact_check_passed={contact_check_passed_cycle_0}")
     if not contact_check_passed_cycle_0:
         print("Cycle 0: initial design did not pass the contact check — continuing anyway, MPNN redesign may fix it.")
 
-    # Best-cycle tracking starts from cycle 0's own analyzed iptm (if it passed the contact check),
-    # rather than an arbitrary -inf placeholder.
-    if contact_check_passed_cycle_0:
-        best_iptm, best_cycle, best_seq, best_pdb_path = iptm_cycle_0, 0, model.seq_list[0], path_pdb_cycle_0
-    else:
-        best_iptm, best_cycle, best_seq, best_pdb_path = float("-inf"), None, None, None
     prev_pdb_path = path_pdb_cycle_0
+
+    # Tall (one row per cycle) history of every metric analyze_structure() computes, for plotting
+    # confidence metrics over cycles later. run_id set directly from design_count (already a param
+    # here) rather than looping over cycle_history afterward in the caller just to stamp it on.
+    cycle_history = [{"run_id": design_count, "cycle": 0, "contact_check_passed": contact_check_passed_cycle_0, **metrics_cycle_0}]
 
     # ---- Cycles 1 -> N: Sequence Design -> Structure Prediction ----
     for cycle in range(1, args.num_cycles + 1):
@@ -175,15 +223,11 @@ def run_refine_cycle(model, seq_designer, args, design_count):
 
         # 2. Re-predict structure with the redesigned binder sequence, target(s) held fixed
         predicted_structure, yaml_input = model.predict_structure()
+        predicted_structure = _best_structure(predicted_structure)
 
-        # 3. Analyze: saves the CIF at our chosen per-cycle path, plus PAE, ptm/iptm/plddt, and (for
-        # holo) contact/ipSAE metrics for every target chain in one call.
-        # model_id=0 (not `cycle`) because each cycle is a fresh single-sample prediction call —
-        # for RunBoltz2 this must match Boltz's own per-call sample numbering (always restarts at
-        # model_0), since model_id is used to locate the file on disk, not just to label it. The
-        # cycle number itself is already captured in path_structure_cycle's filename below.
+        # 3. Analyze the structure
         path_structure_cycle = os.path.join(path_design_specific_folder, f"{model.design_name}_cycle_{cycle}.cif")
-        metrics = model.analyze_structure(predicted_structure, path_structure = path_structure_cycle)
+        metrics = _normalize_plddt_key(model.analyze_structure(predicted_structure, path_structure = path_structure_cycle))
         path_pdb_cycle = convert_cif_to_pdb(path_structure_cycle)
 
         # 4. Contact check for this cycle's structure, using analyze_structure()'s own metrics
@@ -193,30 +237,69 @@ def run_refine_cycle(model, seq_designer, args, design_count):
             for target_chain in target_chains.split(",")
         ]
         contact_check_passed = all(contact_check_res)
+        cycle_history.append({"run_id": design_count, "cycle": cycle, "contact_check_passed": contact_check_passed, **metrics})
+        print(f"Cycle {cycle}: {args.filter_metric}={metrics[args.filter_metric]:.4f}, contact_check_passed={contact_check_passed}")
 
-        # 5. Track best cycle: must pass the contact check and improve on iptm
-        current_iptm = metrics["iptm"]
-        print(f"Cycle {cycle}: iptm={current_iptm:.4f}, contact_check_passed={contact_check_passed}")
-        if contact_check_passed and current_iptm > best_iptm:
-            best_iptm = current_iptm
-            best_cycle, best_seq, best_pdb_path = cycle, new_binder_seq, path_pdb_cycle
-            # Save improved designs to improved_insilico folder along with spec on how to create it
-            best_cycle_design_name = f"{model.design_name}_cycle_{cycle}"
-            shutil.copy2(path_pdb_cycle, os.path.join(path_improved_designs_folder, f"{best_cycle_design_name}.pdb"))
-            with open(os.path.join(path_improved_designs_folder, f"{best_cycle_design_name}.yml"), 'w') as spec_file:
+        # 5. Keep this cycle's design if it passes the contact check and clears args.threshold on args.filter_metric
+        if contact_check_passed and metrics[args.filter_metric] >= args.threshold:
+            design_name_cycle = f"{model.design_name}_run_{design_count}_cycle_{cycle}"
+            shutil.copy2(path_pdb_cycle, os.path.join(path_improved_designs_folder, f"{design_name_cycle}.pdb"))
+            with open(os.path.join(path_improved_designs_folder, f"{design_name_cycle}.yml"), 'w') as spec_file:
                 yaml.dump(yaml_input, spec_file)
         prev_pdb_path = path_pdb_cycle
 
-    return {
-        "best_cycle": best_cycle,
-        "best_seq": best_seq,
-        "best_iptm": best_iptm if best_cycle is not None else None,
-        "best_pdb_path": best_pdb_path,
-    }
+    plot_cycle_metrics_png(cycle_history, run_id=design_count, path_run_folder=path_design_specific_folder)
+    return cycle_history
+
+
+def plot_cycle_metrics_png(cycle_history: list[dict], run_id: int, path_run_folder: str) -> str:
+    df_run = pd.DataFrame(cycle_history).sort_values("cycle")
+    available_metrics = [m for m in _PLOT_METRICS if m.lower() in df_run.columns]
+    if not available_metrics:
+        print("plot_cycle_metrics_png: none of the expected metrics are present, skipping plot.")
+        return ""
+
+    fig, axes = plt.subplots(
+        1, len(available_metrics), figsize=(3.5 * len(available_metrics), 3.5))
+
+    for ax, metric in zip(axes, available_metrics):
+        ax.set_facecolor("#fcfcfb")
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+        for spine in ("left", "bottom"):
+            ax.spines[spine].set_color("#c3c2b7")
+        ax.grid(axis="y", color="#e1e0d9", linewidth=0.8, zorder=0)
+        ax.tick_params(colors="#898781", labelsize=8)
+
+        # Plot points
+        ax.plot(
+            df_run["cycle"], df_run[metric],
+            marker="o", markersize=5, linewidth=2, color=_PLOT_METRICS[metric]['color'], zorder=3,
+        )
+        # Add text of the raw value of the point
+        for x, y in zip(df_run["cycle"], df_run[metric]):
+            ax.annotate(
+                f"{y:.2f}", xy=(x, y), xytext=(0, 8), textcoords="offset points",
+                ha="center", fontsize=7, color="#52514e", clip_on=False,
+            )
+
+        ax.set_title(f"{metric} (Run {run_id})", color="#0b0b0b", fontsize=10)
+        ax.set_xlabel("Cycle", color="#0b0b0b", fontsize=10)
+        ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
+        ax.set_ylim(_PLOT_METRICS[metric]['ymin'], _PLOT_METRICS[metric]['ymax'])
+
+    fig.tight_layout()
+
+    path_png = os.path.join(path_run_folder, "cycle_metrics.png")
+    fig.savefig(path_png, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved cycle metrics plot to {path_png}")
+    return path_png
+
 
 def iterate_over_design_count(args) -> pd.DataFrame:
     """ Run the cycling process for N design attempts and each one has K cycles"""
-    results = []
+    all_cycle_records = []  # tall (run_id, cycle, <every analyze_structure() metric>) history, all design attempts
     for design_count in range(args.num_designs):
         # search_msa_every_cycle is an OpenDDE-only field (RunESMFold2/RunBoltz2 don't have it,
         # and would reject an unexpected kwarg) — only forwarded when actually running OpenDDE.
@@ -228,17 +311,21 @@ def iterate_over_design_count(args) -> pd.DataFrame:
                                          seq_target = args.seq_target, path_output_dir = args.path_output_dir, ligands = args.ligands,
                                          epitope_residues= args.epitope_residues, msa_options = args.msa_options, num_samples = args.num_samples,
                                          **extra_kwargs)
-        
-        result = run_refine_cycle(model = model, seq_designer = seq_designer, args = args, design_count= design_count)
-        result['run_id'] = design_count
-        print("Refinement result:", result)
-        results.append(result)
 
-    # After going through all design attempts:
-    df_designs = pd.DataFrame(results)
+        cycle_history = run_refine_cycle(model = model, seq_designer = seq_designer, args = args, design_count= design_count)
+        all_cycle_records.extend(cycle_history)
+
+    df_all_runs = pd.DataFrame(all_cycle_records)
+    path_all_runs_csv = os.path.join(args.path_output_dir, "all_runs.csv")
+    df_all_runs.to_csv(path_all_runs_csv, index = False)
+    print(f"Saved per-cycle metric history to {path_all_runs_csv}")
+
+    # Passing designs: every cycle (across every design attempt) that passed the contact check and
+    # cleared args.threshold on args.filter_metric — not just a single "best" cycle per attempt.
+    df_designs = df_all_runs[df_all_runs["contact_check_passed"] & (df_all_runs[args.filter_metric] >= args.threshold)]
     path_design_csv = os.path.join(args.path_output_dir, args.filename_output)
     df_designs.to_csv(path_design_csv, index = False)
-    print(f"Saved refinement summary to {path_design_csv}")
+    print(f"Saved {len(df_designs)} passing design(s) ({args.filter_metric} >= {args.threshold}) to {path_design_csv}")
     return path_design_csv
 
 def main():
@@ -281,9 +368,15 @@ def main():
                         help = "Space-separated string of residues on the binder that should be fixed during MPNN seq redesign. e.g. A10 A11 A12 A13" )
     parser.add_argument("--mpnn_temperature", type = float, default = 0.1,
                         help = "Temperature to sample residues during seq redesign. Higher temperature -> greater volatility in the generated sequence")
+    parser.add_argument("--filter_metric", type = str, choices = ['iptm', 'ipsae_min'], default = 'iptm',
+                        help = "Structure-confidence metric used to decide which cycles' designs count as passing.")
+    parser.add_argument("--threshold", type = float, default = None,
+                        help = "Minimum --filter_metric value (plus passing the contact check) for a cycle to be kept as a passing "
+                               "design. Defaults to 0.8 for iptm, 0.61 for ipsae_min if not set.")
     args = parser.parse_args()
+    args.threshold = resolve_threshold(args.filter_metric, args.threshold)
 
-    path_design_csv = iterate_over_design_count(args = args)   
+    path_design_csv = iterate_over_design_count(args = args)
 
     return path_design_csv
 
