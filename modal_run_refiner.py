@@ -52,14 +52,15 @@ _esmfold2_base_image = (
         "torchaudio==2.11.0",
         index_url="https://download.pytorch.org/whl/cu130",
     )
-    .pip_install("esm")
+    # for the full investigation history.
+    .apt_install("git")  # needed to clone the esm@git+... install below
+    .pip_install("esm@git+https://github.com/Biohub/esm.git@main")
     .pip_install(
         "molview",
         "py2Dmol",
         "antpack==0.3.8.6.2",
         "hf-transfer",
         "ipsae",
-        "https://github.com/evolutionaryscale/wheels/releases/download/py312-pt211-cu13-sm80-90/flash_attn-2.7.4.post1-cp312-cp312-linux_x86_64.whl",
     )
     # gemmi/biotite are needed by StrucTools.py (imported via StructurePredictionInputs.py)
     .pip_install("pydantic", "pyyaml", "pandas", "numpy", "requests", "tqdm", "gemmi", "biotite")
@@ -73,6 +74,7 @@ refiner_esmfold2_boltz2_image = (
     # Installed unpinned rather than matching LigandMPNN/requirements.txt's old pins, since those were
     # pinned against a much older torch/numpy than the cu130 stack the base image already installs.
     .pip_install("biopython", "ProDy", "ml-collections", "dm-tree")
+    .pip_install("matplotlib")  # refiner.py's plot_cycle_metrics_png() (Agg backend — no display in a container)
     .pip_install("boltz")  # provides the `boltz` CLI that RunBoltz2.predict_structure shells out to (model_name="Boltz2")
     .apt_install("wget")  # get_model_params.sh shells out to wget; not in debian_slim by default
     # copy=True (not the default lazy mount) since the get_model_params.sh run_commands step below
@@ -95,6 +97,7 @@ refiner_opendde_image = (
         "gemmi", "biotite",  # StrucTools.py deps
         "ipsae",  # StrucTools.calculate_ipSAE CLI
         "biopython", "ProDy", "ml-collections", "dm-tree",  # LigandMPNN deps
+        "matplotlib",  # refiner.py's plot_cycle_metrics_png() (Agg backend — no display in a container)
     )
     .apt_install("wget")  # get_model_params.sh shells out to wget; not in debian_slim by default
     .add_local_dir("LigandMPNN", "/root/LigandMPNN", copy=True, ignore=["model_params", "*.pt"])
@@ -109,7 +112,7 @@ refiner_opendde_image = (
 def _run_refiner_body(model_name: str, seq_binder: str, seq_target: str, design_name: str, num_cycles: int, num_designs: int,
                        num_samples: int, search_msa_every_cycle: bool, ligands: str, msa_options: str,
                        epitope_residues: str, paratope_residues: str, fixed_residues: str, mpnn_temperature: float,
-                       filename_output: str) -> str:
+                       filename_output: str, filter_metric: str, threshold: float) -> str:
     """
     Shared body for both run_refiner_esm_boltz and run_refiner_opendde — Modal binds a function's
     image at decoration time, not call time, so there's no way for one @app.function to pick its
@@ -125,7 +128,7 @@ def _run_refiner_body(model_name: str, seq_binder: str, seq_target: str, design_
     on one code path instead of two that can drift out of sync (as run_refine_cycle's design_count
     param did against this function before an earlier fix).
     """
-    from refiner import iterate_over_design_count
+    from refiner import iterate_over_design_count, resolve_threshold
 
     path_output_dir = f"{OUTPUTS_MOUNT}/{design_name}"
 
@@ -148,6 +151,10 @@ def _run_refiner_body(model_name: str, seq_binder: str, seq_target: str, design_
         fixed_residues=fixed_residues,
         mpnn_temperature=mpnn_temperature,
         filename_output=filename_output,
+        filter_metric=filter_metric,
+        # Same "None means fill in from filter_metric" resolution main() does right after
+        # parse_args() — a Modal function can't express that default in its own signature either.
+        threshold=resolve_threshold(filter_metric, threshold),
     )
     return iterate_over_design_count(args=args)
 
@@ -161,7 +168,7 @@ def _run_refiner_body(model_name: str, seq_binder: str, seq_target: str, design_
 def run_refiner_esm_boltz(model_name: str, seq_binder: str, seq_target: str, design_name: str, num_cycles: int = 5, num_designs: int = 1,
                            num_samples: int = 1, search_msa_every_cycle: bool = True, ligands: str = "", msa_options: str = "",
                            epitope_residues: str = "", paratope_residues: str = "", fixed_residues: str = "", mpnn_temperature: float = 0.10,
-                           filename_output: str = "refined_designs.csv") -> str:
+                           filename_output: str = "refined_designs.csv", filter_metric: str = "iptm", threshold: float = None) -> str:
     """model_name in {'ESMFold2', 'ESMFold2-Fast', 'Boltz2'} — see refiner()'s dispatch below."""
     path_design_csv = _run_refiner_body(
         model_name=model_name, seq_binder=seq_binder, seq_target=seq_target, design_name=design_name,
@@ -169,6 +176,7 @@ def run_refiner_esm_boltz(model_name: str, seq_binder: str, seq_target: str, des
         search_msa_every_cycle=search_msa_every_cycle, ligands=ligands, msa_options=msa_options,
         epitope_residues=epitope_residues, paratope_residues=paratope_residues, fixed_residues=fixed_residues,
         mpnn_temperature=mpnn_temperature, filename_output=filename_output,
+        filter_metric=filter_metric, threshold=threshold,
     )
     outputs_volume.commit()
     boltz_cache_volume.commit()
@@ -184,7 +192,7 @@ def run_refiner_esm_boltz(model_name: str, seq_binder: str, seq_target: str, des
 def run_refiner_opendde(model_name: str, seq_binder: str, seq_target: str, design_name: str, num_cycles: int = 5, num_designs: int = 1,
                          num_samples: int = 1, search_msa_every_cycle: bool = True, ligands: str = "", msa_options: str = "",
                          epitope_residues: str = "", paratope_residues: str = "", fixed_residues: str = "", mpnn_temperature: float = 0.10,
-                         filename_output: str = "refined_designs.csv") -> str:
+                         filename_output: str = "refined_designs.csv", filter_metric: str = "iptm", threshold: float = None) -> str:
     """model_name == 'OpenDDE' — see refiner()'s dispatch below."""
     path_design_csv = _run_refiner_body(
         model_name=model_name, seq_binder=seq_binder, seq_target=seq_target, design_name=design_name,
@@ -192,6 +200,7 @@ def run_refiner_opendde(model_name: str, seq_binder: str, seq_target: str, desig
         search_msa_every_cycle=search_msa_every_cycle, ligands=ligands, msa_options=msa_options,
         epitope_residues=epitope_residues, paratope_residues=paratope_residues, fixed_residues=fixed_residues,
         mpnn_temperature=mpnn_temperature, filename_output=filename_output,
+        filter_metric=filter_metric, threshold=threshold,
     )
     outputs_volume.commit()
     opendde_cache_volume.commit()
@@ -202,7 +211,7 @@ def run_refiner_opendde(model_name: str, seq_binder: str, seq_target: str, desig
 def refiner(model_name: str, seq_binder: str, seq_target: str, design_name: str, num_cycles: int = 5, num_designs: int = 1,
             num_samples: int = 1, search_msa_every_cycle: bool = True, ligands: str = "", epitope_residues: str = "",
             paratope_residues: str = "", fixed_residues: str = "", mpnn_temperature: float = 0.10, msa_options: str = "",
-            filename_output: str = "refined_designs.csv"):
+            filename_output: str = "refined_designs.csv", filter_metric: str = "iptm", threshold: float = None):
     # 1. Pick Structure Prediction Model of Interest for Refinement & Use its respective setup image
     run_fn = run_refiner_opendde if model_name == "OpenDDE" else run_refiner_esm_boltz
     path_design_csv = run_fn.remote(
@@ -221,6 +230,8 @@ def refiner(model_name: str, seq_binder: str, seq_target: str, design_name: str,
         fixed_residues=fixed_residues,
         mpnn_temperature=mpnn_temperature,
         filename_output=filename_output,
+        filter_metric=filter_metric,
+        threshold=threshold,
     )
     print(path_design_csv)
 
