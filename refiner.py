@@ -209,7 +209,8 @@ def run_refine_cycle(model, seq_designer, args, design_count):
     # Tall (one row per cycle) history of every metric analyze_structure() computes, for plotting
     # confidence metrics over cycles later. run_id set directly from design_count (already a param
     # here) rather than looping over cycle_history afterward in the caller just to stamp it on.
-    cycle_history = [{"run_id": design_count, "cycle": 0, "contact_check_passed": contact_check_passed_cycle_0, **metrics_cycle_0}]
+    cycle_history = [{"run_id": design_count, "cycle": 0, "contact_check_passed": contact_check_passed_cycle_0, **metrics_cycle_0,
+                      "seq_binder" : args.seq_binder}]
 
     # ---- Cycles 1 -> N: Sequence Design -> Structure Prediction ----
     for cycle in range(1, args.num_cycles + 1):
@@ -237,7 +238,8 @@ def run_refine_cycle(model, seq_designer, args, design_count):
             for target_chain in target_chains.split(",")
         ]
         contact_check_passed = all(contact_check_res)
-        cycle_history.append({"run_id": design_count, "cycle": cycle, "contact_check_passed": contact_check_passed, **metrics})
+        cycle_history.append({"run_id": design_count, "cycle": cycle, "contact_check_passed": contact_check_passed, **metrics,
+                              "seq_binder" : new_binder_seq})
         print(f"Cycle {cycle}: {args.filter_metric}={metrics[args.filter_metric]:.4f}, contact_check_passed={contact_check_passed}")
 
         # 5. Keep this cycle's design if it passes the contact check and clears args.threshold on args.filter_metric
@@ -316,6 +318,8 @@ def iterate_over_design_count(args) -> pd.DataFrame:
         all_cycle_records.extend(cycle_history)
 
     df_all_runs = pd.DataFrame(all_cycle_records)
+    df_all_runs['seq_target'] = args.seq_target # Adding comma-separated string of target sequences to output folder
+    df_all_runs['ligands'] = args.ligands
     path_all_runs_csv = os.path.join(args.path_output_dir, "all_runs.csv")
     df_all_runs.to_csv(path_all_runs_csv, index = False)
     print(f"Saved per-cycle metric history to {path_all_runs_csv}")
