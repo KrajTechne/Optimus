@@ -172,14 +172,14 @@ def run_refine_cycle(model, seq_designer, args, design_count):
     """
     # Setup: Create overarching design_cycles folder and improved_insilico folder
     target_chains = ",".join(chr(ord('B') + i) for i in range(len(model.seq_list) - 1))
-    path_overarching_design_cycle_folder = os.path.join(args.path_output_dir, "design_cycles")
+    path_overarching_design_cycle_folder = os.path.join(args.path_output_dir, "runs")
     path_improved_designs_folder = os.path.join(args.path_output_dir, "improved_insilico")
     if not os.path.exists(path_overarching_design_cycle_folder):
         os.makedirs(path_overarching_design_cycle_folder)
     if not os.path.exists(path_improved_designs_folder):
         os.makedirs(path_improved_designs_folder)
     # Setup: Create design counter specific folder
-    path_design_specific_folder = os.path.join(path_overarching_design_cycle_folder, f"Run_{design_count}")
+    path_design_specific_folder = os.path.join(path_overarching_design_cycle_folder, f"run_{design_count}")
     if not os.path.exists(path_design_specific_folder):
         os.makedirs(path_design_specific_folder)
 
@@ -359,7 +359,7 @@ def main():
                                "motif-ligand contact (see opendde_msa_findings_2026-09-14.md section 12).")
     parser.add_argument("--ligands", type = str, default = "",
                         help = "Comma-separated string of ligands")
-    parser.add_argument("--filename_output", type = str, default = "refined_designs.csv")
+    parser.add_argument("--filename_output", type = str, default = "top_designs.csv")
     parser.add_argument("--paratope_residues", type = str, default = "",
                         help = "Comma-separated string of residues on the binder that should interact with the target. e.g. 'A10,A11,A12'.")
     parser.add_argument("--epitope_residues", type = str, default = "",
