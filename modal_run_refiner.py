@@ -112,7 +112,7 @@ refiner_opendde_image = (
 def _run_refiner_body(model_name: str, seq_binder: str, seq_target: str, design_name: str, num_cycles: int, num_designs: int,
                        num_samples: int, search_msa_every_cycle: bool, ligands: str, msa_options: str,
                        epitope_residues: str, paratope_residues: str, fixed_residues: str, mpnn_temperature: float,
-                       filename_output: str, filter_metric: str, threshold: float) -> str:
+                       filename_output: str, filter_metric: str, threshold: float, run_validation: str) -> str:
     """
     Shared body for both run_refiner_esm_boltz and run_refiner_opendde — Modal binds a function's
     image at decoration time, not call time, so there's no way for one @app.function to pick its
@@ -155,8 +155,12 @@ def _run_refiner_body(model_name: str, seq_binder: str, seq_target: str, design_
         # Same "None means fill in from filter_metric" resolution main() does right after
         # parse_args() — a Modal function can't express that default in its own signature either.
         threshold=resolve_threshold(filter_metric, threshold),
+        run_validation=run_validation,
     )
-    return iterate_over_design_count(args=args)
+    path_design_csv = iterate_over_design_count(args=args)
+    if run_validation:
+        _run_af3_validation(args=args, path_design_csv=path_design_csv)
+    return path_design_csv
 
 
 @app.function(
@@ -168,7 +172,8 @@ def _run_refiner_body(model_name: str, seq_binder: str, seq_target: str, design_
 def run_refiner_esm_boltz(model_name: str, seq_binder: str, seq_target: str, design_name: str, num_cycles: int = 5, num_designs: int = 1,
                            num_samples: int = 1, search_msa_every_cycle: bool = True, ligands: str = "", msa_options: str = "",
                            epitope_residues: str = "", paratope_residues: str = "", fixed_residues: str = "", mpnn_temperature: float = 0.10,
-                           filename_output: str = "refined_designs.csv", filter_metric: str = "iptm", threshold: float = None) -> str:
+                           filename_output: str = "top_designs.csv", filter_metric: str = "iptm", threshold: float = None,
+                           run_validation: str = "") -> str:
     """model_name in {'ESMFold2', 'ESMFold2-Fast', 'Boltz2'} — see refiner()'s dispatch below."""
     path_design_csv = _run_refiner_body(
         model_name=model_name, seq_binder=seq_binder, seq_target=seq_target, design_name=design_name,
@@ -176,7 +181,7 @@ def run_refiner_esm_boltz(model_name: str, seq_binder: str, seq_target: str, des
         search_msa_every_cycle=search_msa_every_cycle, ligands=ligands, msa_options=msa_options,
         epitope_residues=epitope_residues, paratope_residues=paratope_residues, fixed_residues=fixed_residues,
         mpnn_temperature=mpnn_temperature, filename_output=filename_output,
-        filter_metric=filter_metric, threshold=threshold,
+        filter_metric=filter_metric, threshold=threshold, run_validation=run_validation,
     )
     outputs_volume.commit()
     boltz_cache_volume.commit()
@@ -192,7 +197,8 @@ def run_refiner_esm_boltz(model_name: str, seq_binder: str, seq_target: str, des
 def run_refiner_opendde(model_name: str, seq_binder: str, seq_target: str, design_name: str, num_cycles: int = 5, num_designs: int = 1,
                          num_samples: int = 1, search_msa_every_cycle: bool = True, ligands: str = "", msa_options: str = "",
                          epitope_residues: str = "", paratope_residues: str = "", fixed_residues: str = "", mpnn_temperature: float = 0.10,
-                         filename_output: str = "refined_designs.csv", filter_metric: str = "iptm", threshold: float = None) -> str:
+                         filename_output: str = "top_designs.csv", filter_metric: str = "iptm", threshold: float = None,
+                         run_validation: str = "") -> str:
     """model_name == 'OpenDDE' — see refiner()'s dispatch below."""
     path_design_csv = _run_refiner_body(
         model_name=model_name, seq_binder=seq_binder, seq_target=seq_target, design_name=design_name,
@@ -200,7 +206,7 @@ def run_refiner_opendde(model_name: str, seq_binder: str, seq_target: str, desig
         search_msa_every_cycle=search_msa_every_cycle, ligands=ligands, msa_options=msa_options,
         epitope_residues=epitope_residues, paratope_residues=paratope_residues, fixed_residues=fixed_residues,
         mpnn_temperature=mpnn_temperature, filename_output=filename_output,
-        filter_metric=filter_metric, threshold=threshold,
+        filter_metric=filter_metric, threshold=threshold, run_validation=run_validation,
     )
     outputs_volume.commit()
     opendde_cache_volume.commit()
@@ -211,7 +217,8 @@ def run_refiner_opendde(model_name: str, seq_binder: str, seq_target: str, desig
 def refiner(model_name: str, seq_binder: str, seq_target: str, design_name: str, num_cycles: int = 5, num_designs: int = 1,
             num_samples: int = 1, search_msa_every_cycle: bool = True, ligands: str = "", epitope_residues: str = "",
             paratope_residues: str = "", fixed_residues: str = "", mpnn_temperature: float = 0.10, msa_options: str = "",
-            filename_output: str = "refined_designs.csv", filter_metric: str = "iptm", threshold: float = None):
+            filename_output: str = "top_designs.csv", filter_metric: str = "iptm", threshold: float = None,
+            run_validation: str = ""):
     # 1. Pick Structure Prediction Model of Interest for Refinement & Use its respective setup image
     run_fn = run_refiner_opendde if model_name == "OpenDDE" else run_refiner_esm_boltz
     path_design_csv = run_fn.remote(
@@ -232,6 +239,7 @@ def refiner(model_name: str, seq_binder: str, seq_target: str, design_name: str,
         filename_output=filename_output,
         filter_metric=filter_metric,
         threshold=threshold,
+        run_validation=run_validation,
     )
     print(path_design_csv)
 
@@ -305,8 +313,10 @@ def run_alphafold3(
     use_af3_weights: bool,
     seq_binder: str = "YPSALDEVLLANLENVLHNLQNNNGVSPAIIQHANKQLQELNANPNVPNLGFPGERPRGFEQLDNEEASVPAEAKEEWEVAWNAWQEEMIEHLELRISVVRAYLGE",
     seq_target: str = "LIDVVVVCDESNSIYPWDAVKNFLEKFVQGLDIGPTKTQVGLIQYANNPRVVFNLNTYKTKEEMIVATSQTSQYGGDLTNTFGAIQYARKYAYSAASGGRRSATKVMVVVTDGESHDGSMLKAVIDQCNHDNILRFGIAVLGYLNRNALDTKNLIKEIKAIASIPTERYFFNVSDEAALLEKAGTLGEQIFSI",
-    msa_options: str = "empty,",
+    ligands: str = "",
+    msa_options: str = "",
     design_name: str = "",
+    path_output_dir: str = "",
 ) -> list[dict]:
     from RunAlphaFold3 import RunAlphaFold3
 
@@ -314,20 +324,125 @@ def run_alphafold3(
     # comparable across all four model integrations unless seq_binder/seq_target are overridden.
     if design_name == "":
         design_name = "example_alphafold3_native" if use_af3_weights else "example_openfold3"
+    # path_output_dir left unset (the openfold3/alphafold3_native entrypoints' own default) still
+    # falls back to one dir per design_name, same as before this param existed. A caller passing
+    # its own shared path_output_dir (e.g. the validation step below) relies on AlphaFold3's own
+    # --force_output_dir CLI flag (see RunAlphaFold3.predict_structure()) to create
+    # {path_output_dir}/{design_name}/ per call, so distinct design_names still land in their own
+    # subfolder without this function needing to join the path itself.
+    if path_output_dir == "":
+        path_output_dir = f"{OUTPUTS_MOUNT}/{design_name}"
+    num_chains = 1 + len(seq_target.split(","))
+    # msa_options left unset defaults to "empty" for the binder + a real MSA search ("") for every
+    # target chain — matching the "empty," (binder empty, target(s) searched) convention used
+    # elsewhere in this pipeline (see refiner.py's own --msa_options help text), generalized to
+    # however many comma-separated targets seq_target has, rather than a fixed 2-chain "empty," or
+    # an all-"empty" default that would drop MSA coverage for every chain including the target(s).
+    if msa_options == "":
+        msa_options = ",".join(["empty"] + [""] * (num_chains - 1))
     design = RunAlphaFold3(
         design_name=design_name,
-        seq_list=[seq_binder, seq_target],
+        seq_list=[seq_binder] + seq_target.split(","),
         msa_options=msa_options.split(","),
-        entity_types=["protein", "protein"],
-        ligand_list=['[Mg+2]'],
+        entity_types=["protein"] * num_chains,
+        ligand_list=ligands.split(",") if ligands else [],
         num_samples=5,
         use_af3_weights=use_af3_weights,
         model_dir="/root/af3_native_weights" if use_af3_weights else "/root/af3_converted_weights",
-        path_output_dir=f"{OUTPUTS_MOUNT}/{design_name}",
+        path_output_dir=path_output_dir,
     )
     df_metrics = design.alphafold3_predict_analyze()
     outputs_volume.commit()
     return df_metrics.to_dict(orient="records")
+
+
+def _run_af3_validation(args, path_design_csv: str) -> None:
+    """
+    Validates every row in path_design_csv (top_designs.csv) against a structure-prediction model
+    separate from whichever one produced it (AF3 or OpenFold3, per args.run_validation) — called
+    from _run_refiner_body, so this runs entirely server-side: path_design_csv is already a real
+    filesystem path inside that container (OUTPUTS_MOUNT is mounted there), so reading it needs no
+    client round-trip, and run_alphafold3 is callable directly via .starmap() even though it's
+    bound to a completely different image (alphafold3_image) than the caller's — Modal spins up the
+    callee's own container type regardless of the caller's.
+
+    design_name is already unique per row (iterate_over_design_count sets it to
+    "{model_name}_design_run_{run_id}_cycle_{cycle}"), and AlphaFold3's own --force_output_dir CLI
+    flag (see RunAlphaFold3.predict_structure()) creates a {path_output_dir}/{design_name}/
+    subfolder per call — so passing one shared path_validation_dir as run_alphafold3's
+    path_output_dir is enough to keep every row's structure output in its own subfolder without
+    building any per-row path here.
+
+    Each design gets num_samples=5 diffusion samples from AF3 (run_alphafold3's own fixed default);
+    the best one by iptm is kept as AF3's verdict for that design, matching the refiner loop's own
+    "num_samples -> best-ranked one" convention elsewhere in this pipeline (RunESMFold2's
+    _best_structure, OpenDDE/Boltz2's own internal ranking) — so the comparison between the
+    generating model's score and AF3's score isn't confounded by AF3's per-call sampling noise.
+    """
+    import os
+    import pandas as pd
+
+    # fillna("") since pandas reads an empty CSV cell (e.g. a row with no ligands) back as NaN, not
+    # "" — NaN is truthy in Python, so run_alphafold3's own `if ligands else []` would take the
+    # ligands.split(",") branch and crash calling .split on a float.
+    df_designs = pd.read_csv(path_design_csv).fillna("")
+    if len(df_designs) == 0:
+        print(f"_run_af3_validation: {path_design_csv} has no passing designs, skipping validation.")
+        return
+
+    path_validation_dir = os.path.join(args.path_output_dir, f"validation_{args.run_validation}")
+    use_af3_weights = args.run_validation == "native_af3"
+
+    # Positional, in run_alphafold3's own declared order — .starmap() unpacks each tuple as *args,
+    # so use_af3_weights/path_output_dir are repeated per row (fixed across the batch) rather than
+    # passed once via kwargs=, since kwargs= can't fill use_af3_weights (the first, no-default
+    # positional param) while leaving the varying params to come from the tuple. msa_options left
+    # as "" — run_alphafold3 derives "empty" for the binder + a real MSA search for the target
+    # chain(s) internally, matching the "empty," convention used elsewhere in this pipeline.
+    rows = [
+        (use_af3_weights, row.seq_binder, row.seq_target, row.ligands, "", row.design_name, path_validation_dir)
+        for row in df_designs.itertuples()
+    ]
+    af3_results = run_alphafold3.starmap(rows)
+    best_rows = [max(samples, key=lambda d: d["iptm"]) for samples in af3_results]
+    df_af3 = pd.DataFrame(best_rows).add_prefix("af3_")
+
+    # Safe to concat by position (not a key-based join): both frames are already row-aligned, since
+    # .starmap()'s order_outputs=True (the default) preserves rows' input order.
+    df_validated = pd.concat([df_designs.reset_index(drop=True), df_af3], axis=1)
+    path_validated_csv = os.path.join(args.path_output_dir, f"top_designs_validated_{args.run_validation}.csv")
+    df_validated.to_csv(path_validated_csv, index=False)
+    print(f"Saved {len(df_validated)} AF3-validated design(s) ({args.run_validation}) to {path_validated_csv}")
+
+
+# No GPU/heavy image needed — this function only reads an existing top_designs.csv and dispatches
+# run_alphafold3.starmap() calls; those run on their own alphafold3_image containers regardless of
+# what image this function itself is on.
+_validation_trigger_image = modal.Image.debian_slim(python_version="3.12").pip_install("pandas")
+
+
+@app.function(
+    image=_validation_trigger_image,
+    volumes={OUTPUTS_MOUNT: outputs_volume},
+    timeout=TIMEOUT_SECONDS,
+)
+def run_validation_only(design_name: str, run_validation: str, filename_output: str = "top_designs.csv") -> None:
+    """
+    Re-runs just the AF3 validation step against an existing top_designs.csv from a previous
+    refiner run at the same design_name — without re-running the (expensive) refiner loop that
+    produced it. Useful for re-validating with different settings (e.g. run_validation weights, or
+    a run_alphafold3 change like the msa_options derivation) without redoing the ESMFold2/Boltz2/
+    OpenDDE side, which top_designs.csv's contents don't depend on.
+    """
+    args = SimpleNamespace(path_output_dir=f"{OUTPUTS_MOUNT}/{design_name}", run_validation=run_validation)
+    path_design_csv = f"{OUTPUTS_MOUNT}/{design_name}/{filename_output}"
+    _run_af3_validation(args=args, path_design_csv=path_design_csv)
+    outputs_volume.commit()
+
+
+@app.local_entrypoint()
+def validate(design_name: str, run_validation: str = "of3", filename_output: str = "top_designs.csv"):
+    run_validation_only.remote(design_name=design_name, run_validation=run_validation, filename_output=filename_output)
 
 
 @app.local_entrypoint()

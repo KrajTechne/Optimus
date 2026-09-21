@@ -320,6 +320,14 @@ def iterate_over_design_count(args) -> pd.DataFrame:
     df_all_runs = pd.DataFrame(all_cycle_records)
     df_all_runs['seq_target'] = args.seq_target # Adding comma-separated string of target sequences to output folder
     df_all_runs['ligands'] = args.ligands
+    # Overrides the constant design_name **metrics already carries (same value on every row) with a
+    # per-row-unique one — cheaper done once, vectorized, here than per-cycle inside run_refine_cycle.
+    # Doubles as the design_name AF3 validation uses per row (its own CLI creates a
+    # {path_output_dir}/{design_name}/ subfolder per call, so uniqueness here is what keeps those
+    # from colliding).
+    df_all_runs['design_name'] = (
+        f"{args.model_name}_design_run_" + df_all_runs['run_id'].astype(str) + "_cycle_" + df_all_runs['cycle'].astype(str)
+    )
     path_all_runs_csv = os.path.join(args.path_output_dir, "all_runs.csv")
     df_all_runs.to_csv(path_all_runs_csv, index = False)
     print(f"Saved per-cycle metric history to {path_all_runs_csv}")
@@ -377,6 +385,12 @@ def main():
     parser.add_argument("--threshold", type = float, default = None,
                         help = "Minimum --filter_metric value (plus passing the contact check) for a cycle to be kept as a passing "
                                "design. Defaults to 0.8 for iptm, 0.61 for ipsae_min if not set.")
+    parser.add_argument("--run_validation", type = str, choices = ["", "native_af3", "of3"], default = "",
+                        help = "Whether to validate passing designs with a structure-prediction model separate from the one used "
+                               "for refinement, and which weights to use: '' (default) skips validation, 'native_af3' uses official "
+                               "AlphaFold3 weights, 'of3' uses OpenFold3 weights. Only takes effect when run via modal_run_refiner.py "
+                               "(this arg is read here so it's part of the shared args schema, but plain `python refiner.py` has no "
+                               "way to invoke AF3/OpenFold3's own separate Modal image).")
     args = parser.parse_args()
     args.threshold = resolve_threshold(args.filter_metric, args.threshold)
 
