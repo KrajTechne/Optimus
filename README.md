@@ -54,6 +54,7 @@ This is a general binder-target interface check; it does not on its own confirm 
 |---|---|
 | `refiner.py` | Core refinement loop, CLI entrypoint (`python refiner.py ...`), plotting |
 | `modal_run_refiner.py` | Cloud execution on [Modal](https://modal.com) — per-model-family images/functions, plus the validation step |
+| `modal_run_structure_prediction.py` | One-off (single-shot) structure prediction on Modal — no refinement cycles or sequence redesign |
 | `Run{ESMFold2,Boltz2,OpenDDE,AlphaFold3}.py` | Per-model structure-prediction integrations |
 | `StructurePredictionInputs.py` | Shared base class (inputs, output-dir handling) all four models inherit from |
 | `StrucTools.py` | Structure analysis utilities — binding-interface/contact determination, ipSAE, structure I/O |
@@ -91,8 +92,21 @@ re-running the refiner loop:
 modal run modal_run_refiner.py::validate --design-name "my_design" --run-validation native_af3
 ```
 
-`modal run modal_run_refiner.py::openfold3` / `::alphafold3_native` run a standalone one-off
-structure prediction (not part of a refiner loop) with either weight set.
+### One-off structure prediction (no refinement)
+
+For a single predict+analyze call with any supported model — no cycles, no sequence redesign —
+`modal_run_structure_prediction.py::predict` mirrors `refiner()`'s own dispatch-by-`model_name`
+shape, just across all six models instead of two:
+
+```
+modal run modal_run_structure_prediction.py::predict \
+  --model-name "OpenDDE" \
+  --design-name "one_off_trial" \
+  --seq-binder "<binder sequence>" \
+  --seq-target "<target sequence>"
+```
+
+(`model_name`): `ESMFold2`, `ESMFold2-Fast`, `Boltz2`, `OpenDDE`, `AlphaFold3`, `OpenFold3`
 
 ### Key options
 
