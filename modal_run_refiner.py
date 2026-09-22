@@ -311,8 +311,8 @@ alphafold3_image = (
 )
 def run_alphafold3(
     use_af3_weights: bool,
-    seq_binder: str = "YPSALDEVLLANLENVLHNLQNNNGVSPAIIQHANKQLQELNANPNVPNLGFPGERPRGFEQLDNEEASVPAEAKEEWEVAWNAWQEEMIEHLELRISVVRAYLGE",
-    seq_target: str = "LIDVVVVCDESNSIYPWDAVKNFLEKFVQGLDIGPTKTQVGLIQYANNPRVVFNLNTYKTKEEMIVATSQTSQYGGDLTNTFGAIQYARKYAYSAASGGRRSATKVMVVVTDGESHDGSMLKAVIDQCNHDNILRFGIAVLGYLNRNALDTKNLIKEIKAIASIPTERYFFNVSDEAALLEKAGTLGEQIFSI",
+    seq_binder: str = "",
+    seq_target: str = "",
     ligands: str = "",
     msa_options: str = "",
     design_name: str = "",
@@ -351,7 +351,7 @@ def run_alphafold3(
         model_dir="/root/af3_native_weights" if use_af3_weights else "/root/af3_converted_weights",
         path_output_dir=path_output_dir,
     )
-    df_metrics = design.alphafold3_predict_analyze()
+    df_metrics = design.predict_analyze()
     outputs_volume.commit()
     return df_metrics.to_dict(orient="records")
 
@@ -444,33 +444,3 @@ def run_validation_only(design_name: str, run_validation: str, filename_output: 
 def validate(design_name: str, run_validation: str = "of3", filename_output: str = "top_designs.csv"):
     run_validation_only.remote(design_name=design_name, run_validation=run_validation, filename_output=filename_output)
 
-
-@app.local_entrypoint()
-def openfold3(
-    seq_binder: str = "YPSALDEVLLANLENVLHNLQNNNGVSPAIIQHANKQLQELNANPNVPNLGFPGERPRGFEQLDNEEASVPAEAKEEWEVAWNAWQEEMIEHLELRISVVRAYLGE",
-    seq_target: str = "LIDVVVVCDESNSIYPWDAVKNFLEKFVQGLDIGPTKTQVGLIQYANNPRVVFNLNTYKTKEEMIVATSQTSQYGGDLTNTFGAIQYARKYAYSAASGGRRSATKVMVVVTDGESHDGSMLKAVIDQCNHDNILRFGIAVLGYLNRNALDTKNLIKEIKAIASIPTERYFFNVSDEAALLEKAGTLGEQIFSI",
-    msa_options: str = "empty,",
-    design_name: str = "",
-):
-    # Passed as keywords, matching run_refiner/refiner's convention — see shell_quoting_comma_args
-    # project notes for why msa_options (a comma-separated string) needs to be quoted as one value
-    # on the command line (PowerShell vs Git Bash tokenize adjacent quote/comma args differently).
-    metrics = run_alphafold3.remote(
-        use_af3_weights=False, seq_binder=seq_binder, seq_target=seq_target,
-        msa_options=msa_options, design_name=design_name,
-    )
-    print(metrics)
-
-
-@app.local_entrypoint()
-def alphafold3_native(
-    seq_binder: str = "YPSALDEVLLANLENVLHNLQNNNGVSPAIIQHANKQLQELNANPNVPNLGFPGERPRGFEQLDNEEASVPAEAKEEWEVAWNAWQEEMIEHLELRISVVRAYLGE",
-    seq_target: str = "LIDVVVVCDESNSIYPWDAVKNFLEKFVQGLDIGPTKTQVGLIQYANNPRVVFNLNTYKTKEEMIVATSQTSQYGGDLTNTFGAIQYARKYAYSAASGGRRSATKVMVVVTDGESHDGSMLKAVIDQCNHDNILRFGIAVLGYLNRNALDTKNLIKEIKAIASIPTERYFFNVSDEAALLEKAGTLGEQIFSI",
-    msa_options: str = "empty,",
-    design_name: str = "",
-):
-    metrics = run_alphafold3.remote(
-        use_af3_weights=True, seq_binder=seq_binder, seq_target=seq_target,
-        msa_options=msa_options, design_name=design_name,
-    )
-    print(metrics)
