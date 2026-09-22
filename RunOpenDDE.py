@@ -389,11 +389,11 @@ class RunOpenDDE(StructurePredictionInputs):
 
         return metrics
 
-    def opendde_predict_analyze(self):
+    def predict_analyze(self):
         """
         Function to predict apo or holo structures using OpenDDE, save predicted structures and pae
         matrices, analyze predicted structures, and save metrics to a pandas dataframe. Matches
-        RunBoltz2.boltz_predict_analyze()'s shape.
+        RunBoltz2.predict_analyze()'s shape.
         Returns:
             - df_design_metrics (pd.DataFrame): DataFrame containing metrics for all models of the design
         """

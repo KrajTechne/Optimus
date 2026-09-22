@@ -195,7 +195,7 @@ class RunBoltz2(StructurePredictionInputs):
 
         return metrics
 
-    def boltz_predict_analyze(self):
+    def predict_analyze(self):
         """
         Function to predict apo or holo structures using Boltz2, save predicted structures and pae matrics, analyze predicted structures, and save metrics to a pandas dataframe
         Returns:
