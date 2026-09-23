@@ -31,7 +31,7 @@ def load_config(path: str) -> dict:
 # `<function>.with_options(gpu=...).remote(...)` (see refiner()/predict()'s own gpu_type param),
 # since Modal binds a function's gpu= at decoration time but with_options() rebinds it per call
 # without redefining the function or rebuilding its image.
-GPU_TYPE = "A100"
+GPU_TYPE = "H100"
 TIMEOUT_SECONDS = 60 * 60
 
 # StructurePredictionInputs.py (base validation) and StrucTools.py (binding
