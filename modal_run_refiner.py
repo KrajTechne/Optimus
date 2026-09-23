@@ -11,118 +11,22 @@ Validation Models (External Models not used in Refinement, but for validation of
 - OpenFold3
 - AlphaFold3
 
+Shared Modal infrastructure (app, per-model-family images, volumes, GPU/timeout constants,
+load_config, and run_alphafold3) lives in modal_common.py — imported from there rather than defined
+here, so modal_run_structure_prediction.py's one-off predictions can reuse it too without importing
+this file directly.
 """
 from types import SimpleNamespace
 
 import modal
 
-app = modal.App("structure-prediction")
-
-
-def load_config(path: str) -> dict:
-    """
-    Reads a --config file (YAML or JSON, picked by extension) into a plain dict of kwargs for a
-    local entrypoint (refiner/validate/predict) — runs on the client (local entrypoints are plain
-    local Python, not remote), so needs no Modal machinery, just stdlib json / the already-installed
-    pyyaml (refiner.py already imports it at module level).
-    """
-    with open(path) as f:
-        if path.endswith((".yaml", ".yml")):
-            import yaml
-            return yaml.safe_load(f)
-        elif path.endswith(".json"):
-            import json
-            return json.load(f)
-        raise ValueError(f"--config file must be .yaml, .yml, or .json — got {path!r}")
-
-GPU_TYPE = "A100"
-TIMEOUT_SECONDS = 60 * 60
-
-# StructurePredictionInputs.py (base validation) and StrucTools.py (binding
-# interface / ipSAE helpers) are needed by both RunESMFold2 and RunBoltz2.
-_SHARED_LOCAL_MODULES = ["StructurePredictionInputs", "StrucTools"]
-
-# Persists predicted structures/metrics past the container's lifetime so
-# they can be pulled down afterward with `modal volume get`.
-outputs_volume = modal.Volume.from_name("structure-prediction-outputs", create_if_missing=True)
-OUTPUTS_MOUNT = "/outputs"
-
-# Persists Boltz's CCD data + model weights cache (/root/.boltz, its default
-# cache dir) across runs so they're only downloaded once instead of on every run.
-boltz_cache_volume = modal.Volume.from_name("boltz2-weights-cache", create_if_missing=True)
-BOLTZ_CACHE_MOUNT = "/root/.boltz"
-
-# Same idea for OpenDDE's checkpoint + CCD/common cache (opendde's own default
-# OPENDDE_ROOT_DIR when unset is ~/.cache/opendde
-opendde_cache_volume = modal.Volume.from_name("opendde-weights-cache", create_if_missing=True)
-OPENDDE_CACHE_MOUNT = "/root/.cache/opendde"
-
-
-# ---------------------------------------------------------------------------
-# Images: ESMFold2
-# ---------------------------------------------------------------------------
-_esmfold2_base_image = (
-    modal.Image.debian_slim(python_version="3.12")
-    .pip_install(
-        "torch==2.11.0",
-        "torchvision==0.26.0",
-        "torchaudio==2.11.0",
-        index_url="https://download.pytorch.org/whl/cu130",
-    )
-    # for the full investigation history.
-    .apt_install("git")  # needed to clone the esm@git+... install below
-    .pip_install("esm@git+https://github.com/Biohub/esm.git@main")
-    .pip_install(
-        "molview",
-        "py2Dmol",
-        "antpack==0.3.8.6.2",
-        "hf-transfer",
-        "ipsae",
-    )
-    # gemmi/biotite are needed by StrucTools.py (imported via StructurePredictionInputs.py)
-    .pip_install("pydantic", "pyyaml", "pandas", "numpy", "requests", "tqdm", "gemmi", "biotite")
-)
-# ---------------------------------------------------------------------------
-# Images: ESMFold2 & Boltz2 with Ligand/Soluble/ProteinMPNN for Refinement
-# ---------------------------------------------------------------------------
-refiner_esmfold2_boltz2_image = (
-    _esmfold2_base_image
-    # LigandMPNN's own deps beyond what the base image already provides (torch, numpy, pandas, ...).
-    # Installed unpinned rather than matching LigandMPNN/requirements.txt's old pins, since those were
-    # pinned against a much older torch/numpy than the cu130 stack the base image already installs.
-    .pip_install("biopython", "ProDy", "ml-collections", "dm-tree")
-    .pip_install("matplotlib")  # refiner.py's plot_cycle_metrics_png() (Agg backend — no display in a container)
-    .pip_install("boltz")  # provides the `boltz` CLI that RunBoltz2.predict_structure shells out to (model_name="Boltz2")
-    .apt_install("wget")  # get_model_params.sh shells out to wget; not in debian_slim by default
-    # copy=True (not the default lazy mount) since the get_model_params.sh run_commands step below
-    # needs the file baked into the image layer, not only mounted at function runtime.
-    .add_local_dir("LigandMPNN", "/root/LigandMPNN", copy=True, ignore=["model_params", "*.pt"])
-    .run_commands("bash /root/LigandMPNN/get_model_params.sh /root/LigandMPNN/model_params")
-    # refiner.py's model imports are lazy, per-branch (see load_model_setup_run) — but this one
-    # image serves run_refiner_esm_boltz for BOTH model_name="ESMFold2" and "Boltz2", so RunBoltz2
-    # genuinely needs to be mountable here, not just imported-but-unused.
-    .add_local_python_source(*_SHARED_LOCAL_MODULES, "RunESMFold2", "RunBoltz2", "mmseqs2", "refiner")
-)
-
-# Incompatabile torch dependencies between OpenDDE and ESMFold2: Specifically in pytorch version specs
-refiner_opendde_image = (
-    modal.Image.debian_slim(python_version="3.12")
-    .pip_install("uv")
-    .run_commands("uv pip install --system --torch-backend cu126 'opendde[gpu]'")
-    .pip_install(
-        "huggingface_hub",  # RunOpenDDE._get_runner() uses hf_hub_download for the abag checkpoint
-        "gemmi", "biotite",  # StrucTools.py deps
-        "ipsae",  # StrucTools.calculate_ipSAE CLI
-        "biopython", "ProDy", "ml-collections", "dm-tree",  # LigandMPNN deps
-        "matplotlib",  # refiner.py's plot_cycle_metrics_png() (Agg backend — no display in a container)
-    )
-    .apt_install("wget")  # get_model_params.sh shells out to wget; not in debian_slim by default
-    .add_local_dir("LigandMPNN", "/root/LigandMPNN", copy=True, ignore=["model_params", "*.pt"])
-    .run_commands("bash /root/LigandMPNN/get_model_params.sh /root/LigandMPNN/model_params")
-    # refiner.py's model imports are lazy per-branch (see load_model_setup_run), so this image
-    # only needs RunOpenDDE mountable, not RunESMFold2/RunBoltz2 — the OpenDDE branch is the
-    # only one that will ever actually execute here.
-    .add_local_python_source(*_SHARED_LOCAL_MODULES, "RunOpenDDE", "mmseqs2", "refiner")
+from modal_common import (
+    app, load_config, GPU_TYPE, TIMEOUT_SECONDS,
+    OUTPUTS_MOUNT, outputs_volume,
+    BOLTZ_CACHE_MOUNT, boltz_cache_volume,
+    OPENDDE_CACHE_MOUNT, opendde_cache_volume,
+    refiner_esmfold2_boltz2_image, refiner_opendde_image,
+    run_alphafold3,
 )
 
 
@@ -262,118 +166,6 @@ def refiner(config: str = "", model_name: str = "", seq_binder: str = "", seq_ta
     print(path_design_csv)
 
 
-# ---------------------------------------------------------------------------
-# AlphaFold3 / OpenFold3 (sokrypton/alphafold3 fork — see RunAlphaFold3.py's own docstring for why
-# this fork instead of vanilla google-deepmind/alphafold3: no Docker/HMMER build, MSA via ColabFold's
-# hosted MMseqs2 server instead of local genetic databases, and either weight set loads into the
-# same codebase)
-# ---------------------------------------------------------------------------
-# Separate image (not layered on any existing base) — the fork's published wheel is cp313-only,
-# and jax/dm-haiku/rdkit don't overlap with any other image's stack here.
-alphafold3_image = (
-    modal.Image.debian_slim(python_version="3.13")
-    .apt_install("wget")
-    .pip_install(
-        "jax[cuda12]==0.10.1", "dm-haiku==0.0.17", "rdkit==2025.9.4",
-        "zstandard", "awscli", "tokamax==0.0.11",
-        "gemmi", "biotite", "ipsae", "requests", "tqdm", "pandas",  # StrucTools.py deps
-    )
-    # CPU-only torch solely for converting OpenFold3 weights into a format compatible with AF3 model architecture
-    .pip_install("torch", index_url="https://download.pytorch.org/whl/cpu")
-    .run_commands(
-        "pip install --no-deps "
-        "'https://github.com/sokrypton/alphafold3/releases/download/v3.1.5/"
-        "alphafold3_open-3.1.5-cp313-cp313-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl'"
-    )
-    # run_alphafold.py / convert_of3_weights.py aren't part of the wheel — the fork ships them as
-    # standalone scripts fetched separately (confirmed from Sergey_AlphaFold3_of3.ipynb's install
-    # cell). Downloaded to /root so RunAlphaFold3.predict_structure()'s relative "run_alphafold.py"
-    # subprocess call resolves — matches this repo's existing convention of treating /root as the
-    # function's cwd (/root/.boltz, /root/LigandMPNN, /root/.cache/opendde elsewhere in this file).
-    .run_commands(
-        "cd /root && wget -q -O run_alphafold.py "
-        "https://raw.githubusercontent.com/sokrypton/alphafold3/refs/heads/main/run_alphafold.py",
-        "cd /root && wget -q -O convert_of3_weights.py "
-        "https://raw.githubusercontent.com/sokrypton/alphafold3/refs/heads/main/convert_of3_weights.py",
-    )
-    # Chemical-components database build — weight-independent, one-time, safe to bake into the
-    # image layer (matches the official AF3 Dockerfile's own `RUN uv run build_data` build step).
-    .run_commands("cd /root && build_data")
-    # Both weight sets baked in at build time — both are static public downloads with no per-run
-    # mutation or auth quirks (unlike OpenDDE's abag checkpoint), so there's no need for
-    # opendde_cache_volume-style runtime volume plumbing; every function call skips straight to
-    # inference.
-    #   - OpenFold3 (default, RunAlphaFold3(use_af3_weights=False)): raw checkpoint from the
-    #     public, unauthenticated S3 bucket, converted into AF3's native format via the fork's own
-    #     convert_of3_weights.py. Apache 2.0, no commercial-use restriction.
-    #   - Official AlphaFold3 (RunAlphaFold3(use_af3_weights=True)): direct public download, same
-    #     af3.bin.zst URL investigated for the plain-AF3 path — WEIGHTS_TERMS_OF_USE.md's
-    #     non-commercial restriction still applies; only use with the same institutional clearance
-    #     already obtained for that path.
-    .run_commands(
-        "cd /root && aws s3 cp s3://openfold/staging/of3-p2-155k.pt . --no-sign-request",
-        "cd /root && python convert_of3_weights.py --of3_checkpoint of3-p2-155k.pt "
-        "--output_dir af3_converted_weights",
-        "mkdir -p /root/af3_native_weights && cd /root/af3_native_weights && "
-        "wget -q -O af3.bin.zst https://storage.googleapis.com/alphafold3/af3.bin.zst",
-    )
-    .add_local_python_source(*_SHARED_LOCAL_MODULES, "RunAlphaFold3")
-)
-
-
-@app.function(
-    image=alphafold3_image,
-    gpu=GPU_TYPE,
-    volumes={OUTPUTS_MOUNT: outputs_volume},
-    timeout=TIMEOUT_SECONDS,
-)
-def run_alphafold3(
-    use_af3_weights: bool,
-    seq_binder: str = "",
-    seq_target: str = "",
-    ligands: str = "",
-    msa_options: str = "",
-    design_name: str = "",
-    path_output_dir: str = "",
-) -> list[dict]:
-    from RunAlphaFold3 import RunAlphaFold3
-
-    # Defaults match run_esmfold2/run_boltz2's example binder/target, so results stay directly
-    # comparable across all four model integrations unless seq_binder/seq_target are overridden.
-    if design_name == "":
-        design_name = "example_alphafold3_native" if use_af3_weights else "example_openfold3"
-    # path_output_dir left unset (the openfold3/alphafold3_native entrypoints' own default) still
-    # falls back to one dir per design_name, same as before this param existed. A caller passing
-    # its own shared path_output_dir (e.g. the validation step below) relies on AlphaFold3's own
-    # --force_output_dir CLI flag (see RunAlphaFold3.predict_structure()) to create
-    # {path_output_dir}/{design_name}/ per call, so distinct design_names still land in their own
-    # subfolder without this function needing to join the path itself.
-    if path_output_dir == "":
-        path_output_dir = f"{OUTPUTS_MOUNT}/{design_name}"
-    num_chains = 1 + len(seq_target.split(","))
-    # msa_options left unset defaults to "empty" for the binder + a real MSA search ("") for every
-    # target chain — matching the "empty," (binder empty, target(s) searched) convention used
-    # elsewhere in this pipeline (see refiner.py's own --msa_options help text), generalized to
-    # however many comma-separated targets seq_target has, rather than a fixed 2-chain "empty," or
-    # an all-"empty" default that would drop MSA coverage for every chain including the target(s).
-    if msa_options == "":
-        msa_options = ",".join(["empty"] + [""] * (num_chains - 1))
-    design = RunAlphaFold3(
-        design_name=design_name,
-        seq_list=[seq_binder] + seq_target.split(","),
-        msa_options=msa_options.split(","),
-        entity_types=["protein"] * num_chains,
-        ligand_list=ligands.split(",") if ligands else [],
-        num_samples=5,
-        use_af3_weights=use_af3_weights,
-        model_dir="/root/af3_native_weights" if use_af3_weights else "/root/af3_converted_weights",
-        path_output_dir=path_output_dir,
-    )
-    df_metrics = design.predict_analyze()
-    outputs_volume.commit()
-    return df_metrics.to_dict(orient="records")
-
-
 def _run_af3_validation(args, path_design_csv: str) -> None:
     """
     Validates every row in path_design_csv (top_designs.csv) against a structure-prediction model
@@ -381,8 +173,8 @@ def _run_af3_validation(args, path_design_csv: str) -> None:
     from _run_refiner_body, so this runs entirely server-side: path_design_csv is already a real
     filesystem path inside that container (OUTPUTS_MOUNT is mounted there), so reading it needs no
     client round-trip, and run_alphafold3 is callable directly via .starmap() even though it's
-    bound to a completely different image (alphafold3_image) than the caller's — Modal spins up the
-    callee's own container type regardless of the caller's.
+    bound to a completely different image (alphafold3_image, defined in modal_common.py) than the
+    caller's — Modal spins up the callee's own container type regardless of the caller's.
 
     design_name is already unique per row (iterate_over_design_count sets it to
     "{model_name}_design_run_{run_id}_cycle_{cycle}"), and AlphaFold3's own --force_output_dir CLI
@@ -469,4 +261,3 @@ def validate(config: str = "", design_name: str = "", run_validation: str = "of3
             raise ValueError("design_name is required unless --config is given")
         kwargs = dict(design_name=design_name, run_validation=run_validation, filename_output=filename_output)
     run_validation_only.remote(**kwargs)
-

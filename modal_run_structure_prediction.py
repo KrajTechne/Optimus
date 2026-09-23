@@ -1,18 +1,19 @@
 """
 modal_run_structure_prediction.py — One-off structure prediction: a single predict+analyze call
 against whichever model, no MPNN sequence redesign and no refinement cycles (that's
-modal_run_refiner.py's job). Reuses the exact same per-model-family images, volumes, and app as
-modal_run_refiner.py, and the same "one shared local entrypoint dispatches to the right
-@app.function by model_name" structure as refiner() there — just with six models to dispatch across
-instead of two.
+modal_run_refiner.py's job). Imports its shared Modal infrastructure — app, per-model-family images,
+volumes, and run_alphafold3 — from modal_common.py rather than from modal_run_refiner.py directly,
+so neither of the two entrypoint scripts depends on the other. Uses the same "one shared local
+entrypoint dispatches to the right @app.function by model_name" structure as refiner() in
+modal_run_refiner.py — just with six models to dispatch across instead of two.
 
 Available Structure Prediction Models:
 - ESMFold2, ESMFold2-Fast, Boltz2 (refiner_esmfold2_boltz2_image)
 - OpenDDE (refiner_opendde_image)
-- AlphaFold3, OpenFold3 (alphafold3_image, via the existing run_alphafold3 — also used by
-  modal_run_refiner.py's own validation step, so imported rather than duplicated)
+- AlphaFold3, OpenFold3 (alphafold3_image, via the shared run_alphafold3 in modal_common.py — also
+  used by modal_run_refiner.py's own validation step, so imported rather than duplicated)
 """
-from modal_run_refiner import (
+from modal_common import (
     app,
     OUTPUTS_MOUNT, outputs_volume,
     BOLTZ_CACHE_MOUNT, boltz_cache_volume,
