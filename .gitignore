@@ -3,6 +3,9 @@ __pycache__/
 *.pyc
 .venv/
 
+# Windows Explorer folder-customization artifact
+desktop.ini
+
 # LigandMPNN model checkpoints (downloaded via LigandMPNN/get_model_params.sh)
 LigandMPNN/model_params/
 *.pt
