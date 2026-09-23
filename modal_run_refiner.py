@@ -139,7 +139,7 @@ def refiner(config: str = "", model_name: str = "", seq_binder: str = "", seq_ta
             num_cycles: int = 5, num_designs: int = 1, num_samples: int = 1, search_msa_every_cycle: bool = True,
             ligands: str = "", epitope_residues: str = "", paratope_residues: str = "", fixed_residues: str = "",
             mpnn_temperature: float = 0.10, msa_options: str = "", filename_output: str = "top_designs.csv",
-            filter_metric: str = "iptm", threshold: float = None, run_validation: str = ""):
+            filter_metric: str = "iptm", threshold: float = None, run_validation: str = "", gpu_type: str = GPU_TYPE):
     # --config, when given, replaces every other flag entirely (not merged with them) — simplest to
     # reason about, and avoids needing None-sentinel defaults everywhere just to tell "explicitly
     # passed" apart from "using the default" for a partial-override scheme.
@@ -157,12 +157,18 @@ def refiner(config: str = "", model_name: str = "", seq_binder: str = "", seq_ta
             search_msa_every_cycle=search_msa_every_cycle, ligands=ligands, msa_options=msa_options,
             epitope_residues=epitope_residues, paratope_residues=paratope_residues, fixed_residues=fixed_residues,
             mpnn_temperature=mpnn_temperature, filename_output=filename_output, filter_metric=filter_metric,
-            threshold=threshold, run_validation=run_validation,
+            threshold=threshold, run_validation=run_validation, gpu_type=gpu_type,
         )
+
+    # gpu_type is applied via .with_options(gpu=...) rather than left in kwargs — Modal binds gpu=
+    # at decoration time on the @app.function itself, so overriding it per call needs with_options()
+    # to rebind a fresh callable rather than being a parameter run_refiner_esm_boltz/run_refiner_opendde
+    # accept directly; popped out here since neither function's own signature has a gpu_type param.
+    gpu_type = kwargs.pop("gpu_type", GPU_TYPE)
 
     # 1. Pick Structure Prediction Model of Interest for Refinement & Use its respective setup image
     run_fn = run_refiner_opendde if kwargs["model_name"] == "OpenDDE" else run_refiner_esm_boltz
-    path_design_csv = run_fn.remote(**kwargs)
+    path_design_csv = run_fn.with_options(gpu=gpu_type).remote(**kwargs)
     print(path_design_csv)
 
 

@@ -27,6 +27,10 @@ def load_config(path: str) -> dict:
             return json.load(f)
         raise ValueError(f"--config file must be .yaml, .yml, or .json — got {path!r}")
 
+# Default GPU for every @app.function below — each is still overridable per call via
+# `<function>.with_options(gpu=...).remote(...)` (see refiner()/predict()'s own gpu_type param),
+# since Modal binds a function's gpu= at decoration time but with_options() rebinds it per call
+# without redefining the function or rebuilding its image.
 GPU_TYPE = "A100"
 TIMEOUT_SECONDS = 60 * 60
 
@@ -198,6 +202,7 @@ def run_alphafold3(
     msa_options: str = "",
     design_name: str = "",
     path_output_dir: str = "",
+    num_recycles: int = None,
 ) -> list[dict]:
     """
     Shared by modal_run_refiner.py's own AF3/OpenFold3 validation step (_run_af3_validation) and
@@ -226,6 +231,10 @@ def run_alphafold3(
     # an all-"empty" default that would drop MSA coverage for every chain including the target(s).
     if msa_options == "":
         msa_options = ",".join(["empty"] + [""] * (num_chains - 1))
+    # num_recycles left as None means "use RunAlphaFold3's own default" — omitted from the
+    # constructor call entirely rather than passed as None, since it's a plain pydantic int field
+    # with no None handling of its own.
+    af3_kwargs = {} if num_recycles is None else {"num_recycles": num_recycles}
     design = RunAlphaFold3(
         design_name=design_name,
         seq_list=[seq_binder] + seq_target.split(","),
@@ -236,6 +245,7 @@ def run_alphafold3(
         use_af3_weights=use_af3_weights,
         model_dir="/root/af3_native_weights" if use_af3_weights else "/root/af3_converted_weights",
         path_output_dir=path_output_dir,
+        **af3_kwargs,
     )
     df_metrics = design.predict_analyze()
     outputs_volume.commit()
