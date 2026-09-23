@@ -19,7 +19,7 @@ from modal_run_refiner import (
     OPENDDE_CACHE_MOUNT, opendde_cache_volume,
     GPU_TYPE, TIMEOUT_SECONDS,
     refiner_esmfold2_boltz2_image, refiner_opendde_image,
-    run_alphafold3,
+    run_alphafold3, load_config,
 )
 
 
@@ -86,34 +86,57 @@ def predict_opendde(model_name: str, seq_binder: str, seq_target: str, design_na
 
 
 @app.local_entrypoint()
-def predict(model_name: str, seq_binder: str, seq_target: str, design_name: str, ligands: str = "",
-            msa_options: str = "", epitope_residues: str = "", num_samples: int = 1,
+def predict(config: str = "", model_name: str = "", seq_binder: str = "", seq_target: str = "", design_name: str = "",
+            ligands: str = "", msa_options: str = "", epitope_residues: str = "", num_samples: int = 1,
             search_msa_every_cycle: bool = True):
     """
     One local entrypoint for a single one-off prediction with any supported model — same dispatch
     shape as modal_run_refiner.py's refiner(): pick the @app.function whose image this model_name
     actually needs, call it, print the result.
     """
-    if model_name == "OpenDDE":
-        result = predict_opendde.remote(
+    # --config, when given, replaces every other flag entirely — same precedence as refiner()/validate()
+    # in modal_run_refiner.py.
+    if config:
+        kwargs = load_config(config)
+        missing = [k for k in ("model_name", "seq_binder", "seq_target", "design_name") if k not in kwargs]
+        if missing:
+            raise ValueError(f"--config file is missing required field(s): {missing}")
+    else:
+        if not (model_name and seq_binder and seq_target and design_name):
+            raise ValueError("model_name, seq_binder, seq_target, and design_name are required unless --config is given")
+        kwargs = dict(
             model_name=model_name, seq_binder=seq_binder, seq_target=seq_target, design_name=design_name,
             ligands=ligands, msa_options=msa_options, epitope_residues=epitope_residues,
             num_samples=num_samples, search_msa_every_cycle=search_msa_every_cycle,
         )
-    elif model_name in ("ESMFold2", "ESMFold2-Fast", "Boltz2"):
-        result = predict_esm_boltz.remote(
-            model_name=model_name, seq_binder=seq_binder, seq_target=seq_target, design_name=design_name,
-            ligands=ligands, msa_options=msa_options, epitope_residues=epitope_residues, num_samples=num_samples,
+
+    # The three downstream targets have different signatures (run_alphafold3 doesn't take
+    # epitope_residues/num_samples/search_msa_every_cycle), so pull only what each one accepts
+    # rather than blind **kwargs.
+    if kwargs["model_name"] == "OpenDDE":
+        result = predict_opendde.remote(
+            model_name=kwargs["model_name"], seq_binder=kwargs["seq_binder"], seq_target=kwargs["seq_target"],
+            design_name=kwargs["design_name"], ligands=kwargs.get("ligands", ""),
+            msa_options=kwargs.get("msa_options", ""), epitope_residues=kwargs.get("epitope_residues", ""),
+            num_samples=kwargs.get("num_samples", 1), search_msa_every_cycle=kwargs.get("search_msa_every_cycle", True),
         )
-    elif model_name in ("AlphaFold3", "OpenFold3"):
+    elif kwargs["model_name"] in ("ESMFold2", "ESMFold2-Fast", "Boltz2"):
+        result = predict_esm_boltz.remote(
+            model_name=kwargs["model_name"], seq_binder=kwargs["seq_binder"], seq_target=kwargs["seq_target"],
+            design_name=kwargs["design_name"], ligands=kwargs.get("ligands", ""),
+            msa_options=kwargs.get("msa_options", ""), epitope_residues=kwargs.get("epitope_residues", ""),
+            num_samples=kwargs.get("num_samples", 1),
+        )
+    elif kwargs["model_name"] in ("AlphaFold3", "OpenFold3"):
         result = run_alphafold3.remote(
-            use_af3_weights=(model_name == "AlphaFold3"), seq_binder=seq_binder, seq_target=seq_target,
-            ligands=ligands, msa_options=msa_options, design_name=design_name,
+            use_af3_weights=(kwargs["model_name"] == "AlphaFold3"), seq_binder=kwargs["seq_binder"],
+            seq_target=kwargs["seq_target"], ligands=kwargs.get("ligands", ""),
+            msa_options=kwargs.get("msa_options", ""), design_name=kwargs["design_name"],
         )
     else:
         raise ValueError(
             "model_name must be one of 'ESMFold2', 'ESMFold2-Fast', 'Boltz2', 'OpenDDE', 'AlphaFold3', "
-            f"'OpenFold3' — got {model_name!r}"
+            f"'OpenFold3' — got {kwargs['model_name']!r}"
         )
     print(result)
 

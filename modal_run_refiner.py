@@ -18,6 +18,23 @@ import modal
 
 app = modal.App("structure-prediction")
 
+
+def load_config(path: str) -> dict:
+    """
+    Reads a --config file (YAML or JSON, picked by extension) into a plain dict of kwargs for a
+    local entrypoint (refiner/validate/predict) — runs on the client (local entrypoints are plain
+    local Python, not remote), so needs no Modal machinery, just stdlib json / the already-installed
+    pyyaml (refiner.py already imports it at module level).
+    """
+    with open(path) as f:
+        if path.endswith((".yaml", ".yml")):
+            import yaml
+            return yaml.safe_load(f)
+        elif path.endswith(".json"):
+            import json
+            return json.load(f)
+        raise ValueError(f"--config file must be .yaml, .yml, or .json — got {path!r}")
+
 GPU_TYPE = "A100"
 TIMEOUT_SECONDS = 60 * 60
 
@@ -214,33 +231,34 @@ def run_refiner_opendde(model_name: str, seq_binder: str, seq_target: str, desig
 
 
 @app.local_entrypoint()
-def refiner(model_name: str, seq_binder: str, seq_target: str, design_name: str, num_cycles: int = 5, num_designs: int = 1,
-            num_samples: int = 1, search_msa_every_cycle: bool = True, ligands: str = "", epitope_residues: str = "",
-            paratope_residues: str = "", fixed_residues: str = "", mpnn_temperature: float = 0.10, msa_options: str = "",
-            filename_output: str = "top_designs.csv", filter_metric: str = "iptm", threshold: float = None,
-            run_validation: str = ""):
+def refiner(config: str = "", model_name: str = "", seq_binder: str = "", seq_target: str = "", design_name: str = "",
+            num_cycles: int = 5, num_designs: int = 1, num_samples: int = 1, search_msa_every_cycle: bool = True,
+            ligands: str = "", epitope_residues: str = "", paratope_residues: str = "", fixed_residues: str = "",
+            mpnn_temperature: float = 0.10, msa_options: str = "", filename_output: str = "top_designs.csv",
+            filter_metric: str = "iptm", threshold: float = None, run_validation: str = ""):
+    # --config, when given, replaces every other flag entirely (not merged with them) — simplest to
+    # reason about, and avoids needing None-sentinel defaults everywhere just to tell "explicitly
+    # passed" apart from "using the default" for a partial-override scheme.
+    if config:
+        kwargs = load_config(config)
+        missing = [k for k in ("model_name", "seq_binder", "seq_target", "design_name") if k not in kwargs]
+        if missing:
+            raise ValueError(f"--config file is missing required field(s): {missing}")
+    else:
+        if not (model_name and seq_binder and seq_target and design_name):
+            raise ValueError("model_name, seq_binder, seq_target, and design_name are required unless --config is given")
+        kwargs = dict(
+            model_name=model_name, seq_binder=seq_binder, seq_target=seq_target, design_name=design_name,
+            num_cycles=num_cycles, num_designs=num_designs, num_samples=num_samples,
+            search_msa_every_cycle=search_msa_every_cycle, ligands=ligands, msa_options=msa_options,
+            epitope_residues=epitope_residues, paratope_residues=paratope_residues, fixed_residues=fixed_residues,
+            mpnn_temperature=mpnn_temperature, filename_output=filename_output, filter_metric=filter_metric,
+            threshold=threshold, run_validation=run_validation,
+        )
+
     # 1. Pick Structure Prediction Model of Interest for Refinement & Use its respective setup image
-    run_fn = run_refiner_opendde if model_name == "OpenDDE" else run_refiner_esm_boltz
-    path_design_csv = run_fn.remote(
-        model_name=model_name,
-        seq_binder=seq_binder,
-        seq_target=seq_target,
-        design_name=design_name,
-        num_cycles=num_cycles,
-        num_designs=num_designs,
-        num_samples=num_samples,
-        search_msa_every_cycle=search_msa_every_cycle,
-        ligands=ligands,
-        msa_options=msa_options,
-        epitope_residues=epitope_residues,
-        paratope_residues=paratope_residues,
-        fixed_residues=fixed_residues,
-        mpnn_temperature=mpnn_temperature,
-        filename_output=filename_output,
-        filter_metric=filter_metric,
-        threshold=threshold,
-        run_validation=run_validation,
-    )
+    run_fn = run_refiner_opendde if kwargs["model_name"] == "OpenDDE" else run_refiner_esm_boltz
+    path_design_csv = run_fn.remote(**kwargs)
     print(path_design_csv)
 
 
@@ -441,6 +459,14 @@ def run_validation_only(design_name: str, run_validation: str, filename_output: 
 
 
 @app.local_entrypoint()
-def validate(design_name: str, run_validation: str = "of3", filename_output: str = "top_designs.csv"):
-    run_validation_only.remote(design_name=design_name, run_validation=run_validation, filename_output=filename_output)
+def validate(config: str = "", design_name: str = "", run_validation: str = "of3", filename_output: str = "top_designs.csv"):
+    if config:
+        kwargs = load_config(config)
+        if "design_name" not in kwargs:
+            raise ValueError("--config file is missing required field: design_name")
+    else:
+        if not design_name:
+            raise ValueError("design_name is required unless --config is given")
+        kwargs = dict(design_name=design_name, run_validation=run_validation, filename_output=filename_output)
+    run_validation_only.remote(**kwargs)
 
