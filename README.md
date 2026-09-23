@@ -108,6 +108,23 @@ modal run modal_run_structure_prediction.py::predict \
 
 (`model_name`): `ESMFold2`, `ESMFold2-Fast`, `Boltz2`, `OpenDDE`, `AlphaFold3`, `OpenFold3`
 
+### Using a config file instead of flags
+
+`refiner`, `validate`, and `predict` all accept `--config <path.yaml|path.json>`. When `--config` is
+given, it **replaces every other flag entirely** — all inputs come from the file, and any other flags
+passed alongside it are ignored. Keys match the entrypoint's own flag names (underscores, not dashes).
+`model_name`, `seq_binder`, `seq_target`, and `design_name` are required in the file; everything else
+falls back to the entrypoint's own default if omitted. See `configs/example_refiner.yaml` and
+`configs/example_predict.json`.
+
+```
+modal run modal_run_refiner.py::refiner --config configs/example_refiner.yaml
+modal run modal_run_structure_prediction.py::predict --config configs/example_predict.json
+```
+
+This mainly exists to avoid shell-quoting headaches with sequence strings and comma-separated options
+(`msa_options`, `fixed_residues`, etc.) across PowerShell/Git Bash.
+
 ### Key options
 
 | Flag | Default | Notes |

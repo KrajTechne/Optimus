@@ -1,0 +1,24 @@
+# Example --config file for `modal run modal_run_refiner.py::refiner --config configs/example_refiner.yaml`
+# Keys match the entrypoint's own flag names (with underscores, not dashes). When --config is given,
+# every other CLI flag is ignored — this file is the only source of inputs. model_name, seq_binder,
+# seq_target, and design_name are required; everything else is optional and falls back to the
+# entrypoint's own defaults if omitted.
+
+model_name: ESMFold2
+seq_binder: EVQLVESGGGLVQPGGSLRLSCAASGFTFSSYAMSWVRQAPGKGLEWVSAISGSGGSTYYADSVKGRFTISRDNSKNTLYLQMNSLRAEDTAVYYCAKGRYYYYGMDVWGQGTTVTVSS
+seq_target: GSHMKALTARQQEVFDLIRDHISQTGMPPTRAEIAQRLGFRSPNAAEEHLKALARKGVIEIVSGASRGIRLLQEE
+design_name: example_refiner_run
+ligands: ""
+num_cycles: 6
+num_designs: 3
+num_samples: 1
+search_msa_every_cycle: true
+epitope_residues: ""
+paratope_residues: ""
+fixed_residues: ""
+mpnn_temperature: 0.10
+msa_options: ""
+filename_output: top_designs.csv
+filter_metric: iptm
+threshold: 0.8
+run_validation: of3
