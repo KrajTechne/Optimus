@@ -24,7 +24,7 @@ from types import SimpleNamespace
 import modal
 
 from modal_common import (
-    app, load_config, GPU_TYPE, TIMEOUT_SECONDS, TIMEOUT_AF3_REFINER_SECONDS,
+    app, load_config, GPU_TYPE, TIMEOUT_SECONDS,
     OUTPUTS_MOUNT, outputs_volume,
     BOLTZ_CACHE_MOUNT, boltz_cache_volume,
     OPENDDE_CACHE_MOUNT, opendde_cache_volume,
@@ -145,7 +145,7 @@ def run_refiner_opendde(model_name: str, seq_binder: str, seq_target: str, desig
     # by default, so ask for cores explicitly.
     cpu=8.0,
     volumes={OUTPUTS_MOUNT: outputs_volume},
-    timeout=TIMEOUT_AF3_REFINER_SECONDS,
+    timeout=TIMEOUT_SECONDS,
 )
 def run_refiner_alphafold3(model_name: str, seq_binder: str, seq_target: str, design_name: str, num_cycles: int = 5, num_designs: int = 1,
                             num_samples: int = 1, search_msa_every_cycle: bool = True, ligands: str = "", msa_options: str = "",

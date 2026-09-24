@@ -32,10 +32,7 @@ def load_config(path: str) -> dict:
 # since Modal binds a function's gpu= at decoration time but with_options() rebinds it per call
 # without redefining the function or rebuilding its image.
 GPU_TYPE = "H100"
-TIMEOUT_SECONDS = 60 * 60
-# Refinement with AlphaFold3 runs one AF3 job per cycle (a few minutes each), so several designs x cycles can
-# exceed the default 1-hour timeout.
-TIMEOUT_AF3_REFINER_SECONDS = 4 * 60 * 60
+TIMEOUT_SECONDS = 3 * 60 * 60
 
 # StructurePredictionInputs.py (base validation) and StrucTools.py (binding
 # interface / ipSAE helpers) are needed by both RunESMFold2 and RunBoltz2.
