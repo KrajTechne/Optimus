@@ -37,6 +37,10 @@ import subprocess
 import numpy as np
 import pandas as pd
 
+# List-valued metrics longer than this (AF3's per-atom / per-token arrays) are dropped from the metrics
+# dict; per-chain values like chain_iptm (one entry per chain) are short enough to stay.
+_MAX_LIST_LEN = 50
+
 
 def _detect_flash_attention_and_xla_flags() -> tuple[str, list[str], bool]:
     """
@@ -189,7 +193,21 @@ class RunAlphaFold3(StructurePredictionInputs):
 
         return None, job
 
-    def analyze_structure(self, predicted_structure=None, model_id: int = 0, path_structure: Optional[str] = None):
+    def _best_sample_id(self) -> int:
+        """Index of the sample with the highest ranking_score among this design's samples (0 if none can be read)."""
+        job_dir = os.path.join(self.path_output_dir, self.design_name)
+        best_id, best_score = 0, float("-inf")
+        for sample_dir in sorted(glob.glob(os.path.join(job_dir, f"seed-{self.seed}_sample-*"))):
+            summaries = sorted(glob.glob(os.path.join(sample_dir, "*_summary_confidences.json")))
+            if not summaries:
+                continue
+            with open(summaries[0], "r") as f:
+                score = json.load(f).get("ranking_score", float("-inf"))
+            if score > best_score:
+                best_id, best_score = int(sample_dir.rsplit("_sample-", 1)[1]), score
+        return best_id
+
+    def analyze_structure(self, predicted_structure=None, model_id: Optional[int] = None, path_structure: Optional[str] = None):
         """
             Analyze the structure of a given design.
             Args:
@@ -197,18 +215,22 @@ class RunAlphaFold3(StructurePredictionInputs):
                     the refiner) can drive RunAlphaFold3 through the same analyze_structure(
                     predicted_structure, model_id=..., path_structure=...) call shape as the other
                     three model classes. Its results are read back from disk instead.
-                model_id (int): sample index within the single seed this class always runs with
+                model_id (int, optional): sample index within the single seed this class always runs with
                     (modelSeeds=[self.seed]) — maps to run_alphafold.py's per-sample output
-                    directory "seed-{self.seed}_sample-{model_id}".
+                    directory "seed-{self.seed}_sample-{model_id}". None (default) picks the sample
+                    with the highest ranking_score, so callers that analyze only one structure (the
+                    refiner) get AF3's best sample when num_samples > 1.
                 path_structure (str, optional): if given, the analyzed CIF is copied here — same
                     "fixed path gets overwritten next cycle, caller archives via path_structure"
                     pattern as RunBoltz2/RunOpenDDE.
             Returns:
                 metrics: Dictionary of metrics for given design's model_id structure
         """
+        if model_id is None:
+            model_id = self._best_sample_id()
         metrics = {"design_id": f"{self.design_name}_{model_id}", "design_name": self.design_name, "model_id": model_id}
 
-        # 1. Locate this sample's output directory. 
+        # 1. Locate this sample's output directory.
         job_dir = os.path.join(self.path_output_dir, self.design_name)
         sample_dir = os.path.join(job_dir, f"seed-{self.seed}_sample-{model_id}")
 
@@ -238,6 +260,14 @@ class RunAlphaFold3(StructurePredictionInputs):
         # RunOpenDDE/RunBoltz2 follow (confidence_metrics here is per-sample but AF3's json also
         # embeds the full pae matrix under "pae" — pulled out separately below, not merged in raw).
         metrics.update({k: v for k, v in confidence_metrics.items() if k not in ("pae", "contact_probs")})
+
+        # Mean pLDDT on a 0-1 scale (AF3 reports 0-100), matching RunESMFold2/RunBoltz2's "complex_plddt";
+        # binder_plddt is the same for chain A only. Computed before the per-atom arrays are dropped below —
+        # the per-atom values stay in the structure file's B-factor column and in path_confidence's JSON.
+        atom_plddts = np.array(confidence_metrics["atom_plddts"], dtype=float) / 100
+        atom_chains = np.array(confidence_metrics["atom_chain_ids"])
+        metrics["complex_plddt"] = float(atom_plddts.mean())
+        metrics["binder_plddt"] = float(atom_plddts[atom_chains == "A"].mean())
 
         # 3. PAE: AlphaFold3's own confidences.json already stores it under "pae" (unlike OpenDDE,
         # which needed pulling out of a separate full_data.json under a different key) — re-save
@@ -270,7 +300,9 @@ class RunAlphaFold3(StructurePredictionInputs):
         metrics.update({"path_structure": final_path_structure, "path_predictions": sample_dir,
                          "path_confidence": path_confidence, "path_pae": path_pae})
 
-        return metrics
+        # Keep the metrics dict scalar-sized (it becomes a row in all_runs.csv / all_models_metrics.csv):
+        # drop AF3's per-atom and per-token arrays.
+        return {k: v for k, v in metrics.items() if not (isinstance(v, list) and len(v) > _MAX_LIST_LEN)}
 
     def predict_analyze(self):
         """

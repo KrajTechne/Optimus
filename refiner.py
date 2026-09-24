@@ -75,8 +75,19 @@ def load_model_setup_run(
         from RunOpenDDE import RunOpenDDE
         model = RunOpenDDE(design_name = design_name, seq_list = seq_list, path_output_dir = path_output_dir,
                           ligand_list= ligand_list, desired_epitope_residues= desired_epitope_residues, msa_options= msa_options, **kwargs)
+    elif model_name in ['AlphaFold3', 'OpenFold3']:
+        # AlphaFold3 = official weights, OpenFold3 = OpenFold3 weights; both are baked into the Modal AF3
+        # image at these paths (same ones modal_common.run_alphafold3 uses). As with the other models, an
+        # empty msa_options means no MSA for any chain — pass e.g. "empty,," to search the target chains only.
+        from RunAlphaFold3 import RunAlphaFold3
+        use_af3_weights = (model_name == 'AlphaFold3')
+        model = RunAlphaFold3(design_name = design_name, seq_list = seq_list, path_output_dir = path_output_dir,
+                              ligand_list = ligand_list, desired_epitope_residues = desired_epitope_residues,
+                              msa_options = msa_options, use_af3_weights = use_af3_weights,
+                              model_dir = "/root/af3_native_weights" if use_af3_weights else "/root/af3_converted_weights",
+                              **kwargs)
     else:
-        raise ValueError(f"Model name {model_name} is not supported. Please choose from ['ESMFold2', 'Boltz2', 'ESMFold2-Fast', 'OpenDDE']")
+        raise ValueError(f"Model name {model_name} is not supported. Please choose from ['ESMFold2', 'Boltz2', 'ESMFold2-Fast', 'OpenDDE', 'AlphaFold3', 'OpenFold3']")
 
     # MPNN Wrapper Initialization
     seq_designer = LigandMPNNWrapper(python = "python", run_py = "LigandMPNN/run.py")

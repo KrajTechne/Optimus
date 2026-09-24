@@ -43,7 +43,7 @@ This is a general binder-target interface check; it does not on its own confirm 
 
 ### Supported models
 
-**Refinement_Structure_Prediction** (`model_name`): `ESMFold2`, `ESMFold2-Fast`, `Boltz2`, `OpenDDE`
+**Refinement_Structure_Prediction** (`model_name`): `ESMFold2`, `ESMFold2-Fast`, `Boltz2`, `OpenDDE`, `AlphaFold3` (official weights), `OpenFold3`. AlphaFold3 and OpenFold3 are Modal-only for refinement: the loop and the model share one container (LigandMPNN on CPU, AF3 on the GPU), and every cycle re-runs AF3, so a cycle takes a few minutes. As with the other models, a blank `msa_options` means no MSA for any chain; use e.g. `"empty,,"` to search only the target chains.
 **Refinement_Sequence_Design**: `LigandMPNN` if ligand is provided, else defaults to `SolubleMPNN`
 
 **Validation** (`run_validation`): `native_af3` (AlphaFold3 with native AlphaFold3 weights) or `of3` (OpenFold3,Apache-2.0, no license restriction)
