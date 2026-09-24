@@ -23,3 +23,4 @@ filter_metric: iptm
 threshold: 0.8
 run_validation: of3
 gpu_type: H100
+seed: 0
