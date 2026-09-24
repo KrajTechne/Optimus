@@ -272,9 +272,9 @@ class RunAlphaFold3(StructurePredictionInputs):
 
         return metrics
 
-    def alphafold3_predict_analyze(self):
+    def predict_analyze(self):
         """
-        Matches RunBoltz2.boltz_predict_analyze()'s shape: predict once, analyze every sample.
+        Matches RunBoltz2.predict_analyze()'s shape: predict once, analyze every sample.
         Returns:
             df_design_metrics (pd.DataFrame): DataFrame containing metrics for all models of the design
         """

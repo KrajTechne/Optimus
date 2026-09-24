@@ -1,0 +1,14 @@
+{
+  "model_name": "OpenDDE",
+  "seq_binder": "EVQLVESGGGLVQPGGSLRLSCAASGFTFSSYAMSWVRQAPGKGLEWVSAISGSGGSTYYADSVKGRFTISRDNSKNTLYLQMNSLRAEDTAVYYCAKGRYYYYGMDVWGQGTTVTVSS",
+  "seq_target": "GSHMKALTARQQEVFDLIRDHISQTGMPPTRAEIAQRLGFRSPNAAEEHLKALARKGVIEIVSGASRGIRLLQEE",
+  "design_name": "example_predict_run",
+  "ligands": "",
+  "msa_options": "",
+  "epitope_residues": "",
+  "num_samples": 1,
+  "search_msa_every_cycle": true,
+  "seed": 0,
+  "num_recycles": null,
+  "gpu_type": "H100"
+}
