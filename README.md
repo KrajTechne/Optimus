@@ -132,6 +132,7 @@ This mainly exists to avoid shell-quoting headaches with sequence strings and co
 | `--num_cycles` | 5 | Redesign cycles per design attempt (plus cycle 0) |
 | `--num_designs` | 1 | Independent design attempts |
 | `--num_samples` | 1 | Structure-prediction samples per cycle (best-ranked kept) |
+| `--seed` | 0 | Structure-model seed (ESMFold2, OpenDDE; Boltz2 ignores it). Separate from the fixed MPNN design seed. Does not make ESMFold2 fully reproducible |
 | `--msa_options` | `""` | Comma-separated `empty`/`""` per chain — `"empty,"` = binder unsearched, target searched |
 | `--fixed_residues` | `""` | Space-separated residues (e.g. `A51 A52`) held constant during MPNN redesign |
 | `--epitope_residues` / `--paratope_residues` | `""` | Desired contact residues for the pass/fail contact check |
