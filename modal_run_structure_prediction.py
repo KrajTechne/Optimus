@@ -138,7 +138,7 @@ def predict(config: str = "", model_name: str = "", seq_binder: str = "", seq_ta
     # that don't pass gpu_type see no behavior change.
     #
     # The three downstream targets have different signatures (run_alphafold3 doesn't take
-    # epitope_residues/num_samples/search_msa_every_cycle/seed), so pull only what each one accepts
+    # epitope_residues/search_msa_every_cycle), so pull only what each one accepts
     # rather than blind **kwargs. num_recycles left unset (None) via .get() means "use that model's
     # own default" — see _NUM_RECYCLES_FIELD / run_alphafold3's own num_recycles handling.
     gpu_type = kwargs.get("gpu_type", GPU_TYPE)
@@ -163,7 +163,8 @@ def predict(config: str = "", model_name: str = "", seq_binder: str = "", seq_ta
             use_af3_weights=(kwargs["model_name"] == "AlphaFold3"), seq_binder=kwargs["seq_binder"],
             seq_target=kwargs["seq_target"], ligands=kwargs.get("ligands", ""),
             msa_options=kwargs.get("msa_options", ""), design_name=kwargs["design_name"],
-            num_recycles=kwargs.get("num_recycles"),
+            num_recycles=kwargs.get("num_recycles"), num_samples=kwargs.get("num_samples", 1),
+            seed=kwargs.get("seed", 0),
         )
     else:
         raise ValueError(

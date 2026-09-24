@@ -305,7 +305,7 @@ def iterate_over_design_count(args) -> pd.DataFrame:
     for design_count in range(args.num_designs):
         # search_msa_every_cycle is an OpenDDE-only field (RunESMFold2/RunBoltz2 don't have it,
         # and would reject an unexpected kwarg) — only forwarded when actually running OpenDDE.
-        extra_kwargs = {}
+        extra_kwargs = {"seed": args.seed}
         if args.model_name == 'OpenDDE':
             extra_kwargs['search_msa_every_cycle'] = args.search_msa_every_cycle
 
@@ -362,6 +362,9 @@ def main():
                         help = "Number of designs that you want to generate from initial binder sequence")
     parser.add_argument("--num_samples", type = int, default = 1,
                         help = "Number of structure-prediction samples per cycle (best-ranked one is used). Higher can improve accuracy at little/no extra runtime for some models (e.g. OpenDDE) since samples are batched on the GPU — worth checking per model before assuming it's free.")
+    parser.add_argument("--seed", type = int, default = 0,
+                        help = "Seed for the structure-prediction model (ESMFold2, OpenDDE; Boltz2 does not use it). Separate from the "
+                               "MPNN sequence-design seed, which stays fixed. A fixed seed does not make ESMFold2 fully reproducible.")
     parser.add_argument("--search_msa_every_cycle", action = argparse.BooleanOptionalAction, default = True,
                         help = "OpenDDE only. True (default): real paired+unpaired MSA search every cycle via the public ColabFold API — correct but exposed to that server's occasional multi-minute PENDING queueing. False: cheaper cached/unpaired-only path (each unique sequence searched once, no pairing). Use --no-search_msa_every_cycle to disable.")
     parser.add_argument("--msa_options", type = str, default = "",

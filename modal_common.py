@@ -203,6 +203,8 @@ def run_alphafold3(
     design_name: str = "",
     path_output_dir: str = "",
     num_recycles: int = None,
+    num_samples: int = 5,
+    seed: int = 0,
 ) -> list[dict]:
     """
     Shared by modal_run_refiner.py's own AF3/OpenFold3 validation step (_run_af3_validation) and
@@ -241,7 +243,8 @@ def run_alphafold3(
         msa_options=msa_options.split(","),
         entity_types=["protein"] * num_chains,
         ligand_list=ligands.split(",") if ligands else [],
-        num_samples=5,
+        num_samples=num_samples,
+        seed=seed,
         use_af3_weights=use_af3_weights,
         model_dir="/root/af3_native_weights" if use_af3_weights else "/root/af3_converted_weights",
         path_output_dir=path_output_dir,
