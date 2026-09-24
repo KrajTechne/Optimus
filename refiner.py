@@ -331,6 +331,7 @@ def iterate_over_design_count(args) -> pd.DataFrame:
     df_all_runs = pd.DataFrame(all_cycle_records)
     df_all_runs['seq_target'] = args.seq_target # Adding comma-separated string of target sequences to output folder
     df_all_runs['ligands'] = args.ligands
+    df_all_runs['seed'] = args.seed
     # Overrides the constant design_name **metrics already carries (same value on every row) with a
     # per-row-unique one — cheaper done once, vectorized, here than per-cycle inside run_refine_cycle.
     # Doubles as the design_name AF3 validation uses per row (its own CLI creates a
