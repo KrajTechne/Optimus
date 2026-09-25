@@ -32,7 +32,7 @@ def load_config(path: str) -> dict:
 # since Modal binds a function's gpu= at decoration time but with_options() rebinds it per call
 # without redefining the function or rebuilding its image.
 GPU_TYPE = "H100"
-TIMEOUT_SECONDS = 60 * 60
+TIMEOUT_SECONDS = 3 * 60 * 60
 
 # StructurePredictionInputs.py (base validation) and StrucTools.py (binding
 # interface / ipSAE helpers) are needed by both RunESMFold2 and RunBoltz2.
@@ -136,7 +136,7 @@ refiner_opendde_image = (
 # ---------------------------------------------------------------------------
 # Separate image (not layered on any existing base) — the fork's published wheel is cp313-only,
 # and jax/dm-haiku/rdkit don't overlap with any other image's stack here.
-alphafold3_image = (
+_alphafold3_base_image = (
     modal.Image.debian_slim(python_version="3.13")
     .apt_install("wget")
     .pip_install(
@@ -183,8 +183,23 @@ alphafold3_image = (
         "mkdir -p /root/af3_native_weights && cd /root/af3_native_weights && "
         "wget -q -O af3.bin.zst https://storage.googleapis.com/alphafold3/af3.bin.zst",
     )
-    # modal_common listed explicitly for the same reason as refiner_esmfold2_boltz2_image above.
-    .add_local_python_source(*_SHARED_LOCAL_MODULES, "RunAlphaFold3", "modal_common")
+)
+
+# Local sources go on top of the base rather than inside it, because the refiner image below builds further
+# layers on the same base (build steps cannot follow add_local_python_source).
+# modal_common is listed explicitly for the same reason as in refiner_esmfold2_boltz2_image above.
+alphafold3_image = _alphafold3_base_image.add_local_python_source(*_SHARED_LOCAL_MODULES, "RunAlphaFold3", "modal_common")
+
+# AlphaFold3 / OpenFold3 as the refiner's structure model: the loop (LigandMPNN + bookkeeping) and AF3 share one
+# container, like the other model families. MPNN runs on the CPU torch already in the base image (measured at
+# a few seconds per design even for a ~1,150-residue complex), so no CUDA torch is added — the GPU is AF3's.
+refiner_alphafold3_image = (
+    _alphafold3_base_image
+    .apt_install("build-essential")  # ProDy (LigandMPNN's PDB parser) has no Python 3.13 Linux wheel, so pip compiles it
+    .pip_install("ProDy", "dm-tree", "ml-collections", "biopython", "matplotlib", "pyyaml")
+    .add_local_dir("LigandMPNN", "/root/LigandMPNN", copy=True, ignore=["model_params", "*.pt"])
+    .run_commands("bash /root/LigandMPNN/get_model_params.sh /root/LigandMPNN/model_params")
+    .add_local_python_source(*_SHARED_LOCAL_MODULES, "RunAlphaFold3", "refiner", "modal_common")
 )
 
 

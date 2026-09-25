@@ -24,3 +24,6 @@ threshold: 0.8
 run_validation: of3
 gpu_type: H100
 seed: 0
+# MPNN sequence-design seed. null (or omit) = a fresh random seed every cycle; an integer = base seed, with each
+# design/cycle using seed_mpnn + 1000*design + cycle. The seed used is recorded per cycle in all_runs.csv.
+seed_mpnn: null

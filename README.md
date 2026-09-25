@@ -43,7 +43,7 @@ This is a general binder-target interface check; it does not on its own confirm 
 
 ### Supported models
 
-**Refinement_Structure_Prediction** (`model_name`): `ESMFold2`, `ESMFold2-Fast`, `Boltz2`, `OpenDDE`
+**Refinement_Structure_Prediction** (`model_name`): `ESMFold2`, `ESMFold2-Fast`, `Boltz2`, `OpenDDE`, `AlphaFold3` (official weights), `OpenFold3`. AlphaFold3 and OpenFold3 are Modal-only for refinement: the loop and the model share one container (LigandMPNN on CPU, AF3 on the GPU), and every cycle re-runs AF3, so a cycle takes a few minutes. As with the other models, a blank `msa_options` means no MSA for any chain; use e.g. `"empty,,"` to search only the target chains.
 **Refinement_Sequence_Design**: `LigandMPNN` if ligand is provided, else defaults to `SolubleMPNN`
 
 **Validation** (`run_validation`): `native_af3` (AlphaFold3 with native AlphaFold3 weights) or `of3` (OpenFold3,Apache-2.0, no license restriction)
@@ -132,7 +132,8 @@ This mainly exists to avoid shell-quoting headaches with sequence strings and co
 | `--num_cycles` | 5 | Redesign cycles per design attempt (plus cycle 0) |
 | `--num_designs` | 1 | Independent design attempts |
 | `--num_samples` | 1 | Structure-prediction samples per cycle (best-ranked kept) |
-| `--seed` | 0 | Structure-model seed (ESMFold2, OpenDDE; Boltz2 ignores it). Separate from the fixed MPNN design seed. Does not make ESMFold2 fully reproducible |
+| `--seed` | 0 | Structure-model seed (ESMFold2, OpenDDE; Boltz2 ignores it). Separate from `--seed_mpnn`. Does not make ESMFold2 fully reproducible |
+| `--seed_mpnn` | random | MPNN sequence-design seed. Not given: a fresh random seed every cycle. Given: a base seed, with each design attempt/cycle using `seed_mpnn + 1000*design + cycle`. The seed used is recorded per cycle in the `seed_mpnn` column of `all_runs.csv` (empty for cycle 0) |
 | `--msa_options` | `""` | Comma-separated `empty`/`""` per chain — `"empty,"` = binder unsearched, target searched |
 | `--fixed_residues` | `""` | Space-separated residues (e.g. `A51 A52`) held constant during MPNN redesign |
 | `--epitope_residues` / `--paratope_residues` | `""` | Desired contact residues for the pass/fail contact check |

@@ -75,13 +75,34 @@ def load_model_setup_run(
         from RunOpenDDE import RunOpenDDE
         model = RunOpenDDE(design_name = design_name, seq_list = seq_list, path_output_dir = path_output_dir,
                           ligand_list= ligand_list, desired_epitope_residues= desired_epitope_residues, msa_options= msa_options, **kwargs)
+    elif model_name in ['AlphaFold3', 'OpenFold3']:
+        # AlphaFold3 = official weights, OpenFold3 = OpenFold3 weights; both are baked into the Modal AF3
+        # image at these paths (same ones modal_common.run_alphafold3 uses). As with the other models, an
+        # empty msa_options means no MSA for any chain — pass e.g. "empty,," to search the target chains only.
+        from RunAlphaFold3 import RunAlphaFold3
+        use_af3_weights = (model_name == 'AlphaFold3')
+        model = RunAlphaFold3(design_name = design_name, seq_list = seq_list, path_output_dir = path_output_dir,
+                              ligand_list = ligand_list, desired_epitope_residues = desired_epitope_residues,
+                              msa_options = msa_options, use_af3_weights = use_af3_weights,
+                              model_dir = "/root/af3_native_weights" if use_af3_weights else "/root/af3_converted_weights",
+                              **kwargs)
     else:
-        raise ValueError(f"Model name {model_name} is not supported. Please choose from ['ESMFold2', 'Boltz2', 'ESMFold2-Fast', 'OpenDDE']")
+        raise ValueError(f"Model name {model_name} is not supported. Please choose from ['ESMFold2', 'Boltz2', 'ESMFold2-Fast', 'OpenDDE', 'AlphaFold3', 'OpenFold3']")
 
     # MPNN Wrapper Initialization
     seq_designer = LigandMPNNWrapper(python = "python", run_py = "LigandMPNN/run.py")
 
     return model, seq_designer
+
+def resolve_mpnn_seed(seed_mpnn, design_count: int, cycle: int) -> int:
+    """
+    Seed for one MPNN call. None/"" (default): a fresh random seed every call. An int: a base seed the whole run
+    derives from, offset per design attempt and per cycle so no two calls share a seed (cycle < 1000).
+    Either way the caller records the returned value, so any cycle's seed is traceable in all_runs.csv.
+    """
+    if seed_mpnn is None or seed_mpnn == "":
+        return int(np.random.randint(0, high = 2**31 - 1))
+    return int(seed_mpnn) + 1000 * design_count + cycle
 
 def design_sequence(designer,model_type,pdb_file,chains_to_design="A",omit_AA="C",bias_AA="",temperature=0.10,return_logits=False,
                     fixed_residues = "", seed = 111):
@@ -92,7 +113,7 @@ def design_sequence(designer,model_type,pdb_file,chains_to_design="A",omit_AA="C
     seq, logits = designer.run(
         model_type=model_type,
         pdb_path=pdb_file,
-        seed=seed, # Fixed seed for reproducibility per design tool
+        seed=seed, # run_refine_cycle passes the per-cycle seed from resolve_mpnn_seed()
         chains_to_design=chains_to_design,
         bias_AA=bias_AA,
         omit_AA=omit_AA,
@@ -215,8 +236,10 @@ def run_refine_cycle(model, seq_designer, args, design_count):
     # ---- Cycles 1 -> N: Sequence Design -> Structure Prediction ----
     for cycle in range(1, args.num_cycles + 1):
         # 1. Design a new binder sequence via MPNN, conditioned on the previous cycle's structure
+        seed_mpnn = resolve_mpnn_seed(args.seed_mpnn, design_count, cycle)
         seq_str, _ = design_sequence(seq_designer, model_type, pdb_file = prev_pdb_path, fixed_residues= args.fixed_residues,
-                                            chains_to_design = "A", temperature = args.mpnn_temperature)
+                                            chains_to_design = "A", temperature = args.mpnn_temperature, seed = seed_mpnn)
+        print(f"MPNN seed_mpnn={seed_mpnn}")
         print("MPNN_Derived_Binder_Seq: ", seq_str)
         new_binder_seq = seq_str.split(":")[0] 
 
@@ -239,7 +262,7 @@ def run_refine_cycle(model, seq_designer, args, design_count):
         ]
         contact_check_passed = all(contact_check_res)
         cycle_history.append({"run_id": design_count, "cycle": cycle, "contact_check_passed": contact_check_passed, **metrics,
-                              "seq_binder" : new_binder_seq})
+                              "seq_binder" : new_binder_seq, "seed_mpnn": seed_mpnn})
         print(f"Cycle {cycle}: {args.filter_metric}={metrics[args.filter_metric]:.4f}, contact_check_passed={contact_check_passed}")
 
         # 5. Keep this cycle's design if it passes the contact check and clears args.threshold on args.filter_metric
@@ -320,6 +343,9 @@ def iterate_over_design_count(args) -> pd.DataFrame:
     df_all_runs = pd.DataFrame(all_cycle_records)
     df_all_runs['seq_target'] = args.seq_target # Adding comma-separated string of target sequences to output folder
     df_all_runs['ligands'] = args.ligands
+    df_all_runs['seed'] = args.seed
+    if 'seed_mpnn' in df_all_runs:  # absent when num_cycles=0 (no MPNN step ran)
+        df_all_runs['seed_mpnn'] = df_all_runs['seed_mpnn'].astype('Int64')  # cycle 0's NaN would otherwise turn seeds into floats
     # Overrides the constant design_name **metrics already carries (same value on every row) with a
     # per-row-unique one — cheaper done once, vectorized, here than per-cycle inside run_refine_cycle.
     # Doubles as the design_name AF3 validation uses per row (its own CLI creates a
@@ -363,8 +389,12 @@ def main():
     parser.add_argument("--num_samples", type = int, default = 1,
                         help = "Number of structure-prediction samples per cycle (best-ranked one is used). Higher can improve accuracy at little/no extra runtime for some models (e.g. OpenDDE) since samples are batched on the GPU — worth checking per model before assuming it's free.")
     parser.add_argument("--seed", type = int, default = 0,
-                        help = "Seed for the structure-prediction model (ESMFold2, OpenDDE; Boltz2 does not use it). Separate from the "
-                               "MPNN sequence-design seed, which stays fixed. A fixed seed does not make ESMFold2 fully reproducible.")
+                        help = "Seed for the structure-prediction model (ESMFold2, OpenDDE; Boltz2 does not use it). Separate from "
+                               "--seed_mpnn. A fixed seed does not make ESMFold2 fully reproducible.")
+    parser.add_argument("--seed_mpnn", type = int, default = None,
+                        help = "Seed for the MPNN sequence design. Not given (default): a fresh random seed every cycle. Given: a base seed, "
+                               "and each design attempt/cycle uses seed_mpnn + 1000*design + cycle. The seed used is recorded per cycle "
+                               "in the seed_mpnn column of all_runs.csv (empty for cycle 0, which has no MPNN step).")
     parser.add_argument("--search_msa_every_cycle", action = argparse.BooleanOptionalAction, default = True,
                         help = "OpenDDE only. True (default): real paired+unpaired MSA search every cycle via the public ColabFold API — correct but exposed to that server's occasional multi-minute PENDING queueing. False: cheaper cached/unpaired-only path (each unique sequence searched once, no pairing). Use --no-search_msa_every_cycle to disable.")
     parser.add_argument("--msa_options", type = str, default = "",

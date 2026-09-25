@@ -6,6 +6,9 @@ Available Structure Prediction Models for Refinement:
 - ESMFold2 (Fast, with model caching)
 - ESMFold2-Fast (Fastest but no MSAs allowed as input, with model_caching)
 - Boltz2 (Slow, no model or runner caching)
+- AlphaFold3 (official weights) / OpenFold3 (OpenFold3 weights): the loop and the model share one
+  container (MPNN on CPU, AF3 on the GPU); every cycle re-runs AF3 as a subprocess, so a cycle takes a
+  few minutes
 
 Validation Models (External Models not used in Refinement, but for validation of designs via separate, distinct structure prediction models):
 - OpenFold3
@@ -25,7 +28,7 @@ from modal_common import (
     OUTPUTS_MOUNT, outputs_volume,
     BOLTZ_CACHE_MOUNT, boltz_cache_volume,
     OPENDDE_CACHE_MOUNT, opendde_cache_volume,
-    refiner_esmfold2_boltz2_image, refiner_opendde_image,
+    refiner_esmfold2_boltz2_image, refiner_opendde_image, refiner_alphafold3_image,
     run_alphafold3,
 )
 
@@ -33,7 +36,8 @@ from modal_common import (
 def _run_refiner_body(model_name: str, seq_binder: str, seq_target: str, design_name: str, num_cycles: int, num_designs: int,
                        num_samples: int, search_msa_every_cycle: bool, ligands: str, msa_options: str,
                        epitope_residues: str, paratope_residues: str, fixed_residues: str, mpnn_temperature: float,
-                       filename_output: str, filter_metric: str, threshold: float, run_validation: str, seed: int = 0) -> str:
+                       filename_output: str, filter_metric: str, threshold: float, run_validation: str, seed: int = 0,
+                       seed_mpnn: int = None) -> str:
     """
     Shared body for both run_refiner_esm_boltz and run_refiner_opendde — Modal binds a function's
     image at decoration time, not call time, so there's no way for one @app.function to pick its
@@ -78,6 +82,7 @@ def _run_refiner_body(model_name: str, seq_binder: str, seq_target: str, design_
         threshold=resolve_threshold(filter_metric, threshold),
         run_validation=run_validation,
         seed=seed,
+        seed_mpnn=seed_mpnn,
     )
     path_design_csv = iterate_over_design_count(args=args)
     if run_validation:
@@ -95,7 +100,7 @@ def run_refiner_esm_boltz(model_name: str, seq_binder: str, seq_target: str, des
                            num_samples: int = 1, search_msa_every_cycle: bool = True, ligands: str = "", msa_options: str = "",
                            epitope_residues: str = "", paratope_residues: str = "", fixed_residues: str = "", mpnn_temperature: float = 0.10,
                            filename_output: str = "top_designs.csv", filter_metric: str = "iptm", threshold: float = None,
-                           run_validation: str = "", seed: int = 0) -> str:
+                           run_validation: str = "", seed: int = 0, seed_mpnn: int = None) -> str:
     """model_name in {'ESMFold2', 'ESMFold2-Fast', 'Boltz2'} — see refiner()'s dispatch below."""
     path_design_csv = _run_refiner_body(
         model_name=model_name, seq_binder=seq_binder, seq_target=seq_target, design_name=design_name,
@@ -103,7 +108,7 @@ def run_refiner_esm_boltz(model_name: str, seq_binder: str, seq_target: str, des
         search_msa_every_cycle=search_msa_every_cycle, ligands=ligands, msa_options=msa_options,
         epitope_residues=epitope_residues, paratope_residues=paratope_residues, fixed_residues=fixed_residues,
         mpnn_temperature=mpnn_temperature, filename_output=filename_output,
-        filter_metric=filter_metric, threshold=threshold, run_validation=run_validation, seed=seed,
+        filter_metric=filter_metric, threshold=threshold, run_validation=run_validation, seed=seed, seed_mpnn=seed_mpnn,
     )
     outputs_volume.commit()
     boltz_cache_volume.commit()
@@ -120,7 +125,7 @@ def run_refiner_opendde(model_name: str, seq_binder: str, seq_target: str, desig
                          num_samples: int = 1, search_msa_every_cycle: bool = True, ligands: str = "", msa_options: str = "",
                          epitope_residues: str = "", paratope_residues: str = "", fixed_residues: str = "", mpnn_temperature: float = 0.10,
                          filename_output: str = "top_designs.csv", filter_metric: str = "iptm", threshold: float = None,
-                         run_validation: str = "", seed: int = 0) -> str:
+                         run_validation: str = "", seed: int = 0, seed_mpnn: int = None) -> str:
     """model_name == 'OpenDDE' — see refiner()'s dispatch below."""
     path_design_csv = _run_refiner_body(
         model_name=model_name, seq_binder=seq_binder, seq_target=seq_target, design_name=design_name,
@@ -128,10 +133,37 @@ def run_refiner_opendde(model_name: str, seq_binder: str, seq_target: str, desig
         search_msa_every_cycle=search_msa_every_cycle, ligands=ligands, msa_options=msa_options,
         epitope_residues=epitope_residues, paratope_residues=paratope_residues, fixed_residues=fixed_residues,
         mpnn_temperature=mpnn_temperature, filename_output=filename_output,
-        filter_metric=filter_metric, threshold=threshold, run_validation=run_validation, seed=seed,
+        filter_metric=filter_metric, threshold=threshold, run_validation=run_validation, seed=seed, seed_mpnn=seed_mpnn,
     )
     outputs_volume.commit()
     opendde_cache_volume.commit()
+    return path_design_csv
+
+
+@app.function(
+    image=refiner_alphafold3_image,
+    gpu=GPU_TYPE,
+    # LigandMPNN runs on CPU in this image (no CUDA torch), and GPU containers get only a fraction of a core
+    # by default, so ask for cores explicitly.
+    cpu=8.0,
+    volumes={OUTPUTS_MOUNT: outputs_volume},
+    timeout=TIMEOUT_SECONDS,
+)
+def run_refiner_alphafold3(model_name: str, seq_binder: str, seq_target: str, design_name: str, num_cycles: int = 5, num_designs: int = 1,
+                            num_samples: int = 1, search_msa_every_cycle: bool = True, ligands: str = "", msa_options: str = "",
+                            epitope_residues: str = "", paratope_residues: str = "", fixed_residues: str = "", mpnn_temperature: float = 0.10,
+                            filename_output: str = "top_designs.csv", filter_metric: str = "iptm", threshold: float = None,
+                            run_validation: str = "", seed: int = 0, seed_mpnn: int = None) -> str:
+    """model_name in {'AlphaFold3', 'OpenFold3'} — see refiner()'s dispatch below."""
+    path_design_csv = _run_refiner_body(
+        model_name=model_name, seq_binder=seq_binder, seq_target=seq_target, design_name=design_name,
+        num_cycles=num_cycles, num_designs=num_designs, num_samples=num_samples,
+        search_msa_every_cycle=search_msa_every_cycle, ligands=ligands, msa_options=msa_options,
+        epitope_residues=epitope_residues, paratope_residues=paratope_residues, fixed_residues=fixed_residues,
+        mpnn_temperature=mpnn_temperature, filename_output=filename_output,
+        filter_metric=filter_metric, threshold=threshold, run_validation=run_validation, seed=seed, seed_mpnn=seed_mpnn,
+    )
+    outputs_volume.commit()
     return path_design_csv
 
 
@@ -141,7 +173,7 @@ def refiner(config: str = "", model_name: str = "", seq_binder: str = "", seq_ta
             ligands: str = "", epitope_residues: str = "", paratope_residues: str = "", fixed_residues: str = "",
             mpnn_temperature: float = 0.10, msa_options: str = "", filename_output: str = "top_designs.csv",
             filter_metric: str = "iptm", threshold: float = None, run_validation: str = "", gpu_type: str = GPU_TYPE,
-            seed: int = 0):
+            seed: int = 0, seed_mpnn: int = None):
     # --config, when given, replaces every other flag entirely (not merged with them) — simplest to
     # reason about, and avoids needing None-sentinel defaults everywhere just to tell "explicitly
     # passed" apart from "using the default" for a partial-override scheme.
@@ -159,7 +191,7 @@ def refiner(config: str = "", model_name: str = "", seq_binder: str = "", seq_ta
             search_msa_every_cycle=search_msa_every_cycle, ligands=ligands, msa_options=msa_options,
             epitope_residues=epitope_residues, paratope_residues=paratope_residues, fixed_residues=fixed_residues,
             mpnn_temperature=mpnn_temperature, filename_output=filename_output, filter_metric=filter_metric,
-            threshold=threshold, run_validation=run_validation, gpu_type=gpu_type, seed=seed,
+            threshold=threshold, run_validation=run_validation, gpu_type=gpu_type, seed=seed, seed_mpnn=seed_mpnn,
         )
 
     # gpu_type is applied via .with_options(gpu=...) rather than left in kwargs — Modal binds gpu=
@@ -169,7 +201,12 @@ def refiner(config: str = "", model_name: str = "", seq_binder: str = "", seq_ta
     gpu_type = kwargs.pop("gpu_type", GPU_TYPE)
 
     # 1. Pick Structure Prediction Model of Interest for Refinement & Use its respective setup image
-    run_fn = run_refiner_opendde if kwargs["model_name"] == "OpenDDE" else run_refiner_esm_boltz
+    if kwargs["model_name"] == "OpenDDE":
+        run_fn = run_refiner_opendde
+    elif kwargs["model_name"] in ("AlphaFold3", "OpenFold3"):
+        run_fn = run_refiner_alphafold3
+    else:
+        run_fn = run_refiner_esm_boltz
     path_design_csv = run_fn.with_options(gpu=gpu_type).remote(**kwargs)
     print(path_design_csv)
 
