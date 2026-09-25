@@ -193,8 +193,9 @@ def run_refine_cycle(model, seq_designer, args, design_count):
     """
     # Setup: Create overarching design_cycles folder and improved_insilico folder
     target_chains = ",".join(chr(ord('B') + i) for i in range(len(model.seq_list) - 1))
-    path_overarching_design_cycle_folder = os.path.join(args.path_output_dir, "runs")
-    path_improved_designs_folder = os.path.join(args.path_output_dir, "improved_insilico")
+    path_run_dir = get_run_dir(args)
+    path_overarching_design_cycle_folder = os.path.join(path_run_dir, "runs")
+    path_improved_designs_folder = os.path.join(path_run_dir, "improved_insilico")
     if not os.path.exists(path_overarching_design_cycle_folder):
         os.makedirs(path_overarching_design_cycle_folder)
     if not os.path.exists(path_improved_designs_folder):
@@ -322,18 +323,23 @@ def plot_cycle_metrics_png(cycle_history: list[dict], run_id: int, path_run_fold
     return path_png
 
 
-def save_run_config(args, filename: str = "run_config.yaml") -> str:
+def get_run_dir(args) -> str:
+    """This run's own folder: {path_output_dir}/{design_name}. path_output_dir is the parent shared by runs."""
+    return os.path.join(args.path_output_dir, args.design_name)
+
+def save_run_config(args, filename: str = "run_config.yaml", **overrides) -> str:
     """
     Writes every setting this run uses (the fully resolved args, e.g. the threshold default already filled in)
-    into the output folder, so a run's conditions can be recovered from its outputs alone. From the Modal
-    entrypoint the file can be passed back to --config to rerun the condition (refiner() ignores its
-    path_output_dir key, which is derived from design_name). Reusing a design_name overwrites the previous
-    run's file.
+    into the run folder, so a run's conditions can be recovered from its outputs alone. From the Modal
+    entrypoint the file can be passed back to --config to rerun the condition. overrides replace individual
+    values in the saved copy (Modal passes path_output_dir as the volume-relative folder the user gave, not the
+    resolved mount path). Reusing a design_name overwrites the previous run's file.
     """
-    os.makedirs(args.path_output_dir, exist_ok = True)
-    path_config = os.path.join(args.path_output_dir, filename)
+    path_run_dir = get_run_dir(args)
+    os.makedirs(path_run_dir, exist_ok = True)
+    path_config = os.path.join(path_run_dir, filename)
     with open(path_config, "w", encoding = "utf-8") as f:
-        yaml.safe_dump(vars(args), f, sort_keys = False)
+        yaml.safe_dump({**vars(args), **overrides}, f, sort_keys = False)
     return path_config
 
 def iterate_over_design_count(args) -> pd.DataFrame:
@@ -347,7 +353,7 @@ def iterate_over_design_count(args) -> pd.DataFrame:
             extra_kwargs['search_msa_every_cycle'] = args.search_msa_every_cycle
 
         model, seq_designer = load_model_setup_run(model_name = args.model_name, design_name = args.design_name, seq_binder = args.seq_binder,
-                                         seq_target = args.seq_target, path_output_dir = args.path_output_dir, ligands = args.ligands,
+                                         seq_target = args.seq_target, path_output_dir = get_run_dir(args), ligands = args.ligands,
                                          epitope_residues= args.epitope_residues, msa_options = args.msa_options, num_samples = args.num_samples,
                                          **extra_kwargs)
 
@@ -368,14 +374,14 @@ def iterate_over_design_count(args) -> pd.DataFrame:
     df_all_runs['design_name'] = (
         f"{args.model_name}_design_run_" + df_all_runs['run_id'].astype(str) + "_cycle_" + df_all_runs['cycle'].astype(str)
     )
-    path_all_runs_csv = os.path.join(args.path_output_dir, "all_runs.csv")
+    path_all_runs_csv = os.path.join(get_run_dir(args), "all_runs.csv")
     df_all_runs.to_csv(path_all_runs_csv, index = False)
     print(f"Saved per-cycle metric history to {path_all_runs_csv}")
 
     # Passing designs: every cycle (across every design attempt) that passed the contact check and
     # cleared args.threshold on args.filter_metric — not just a single "best" cycle per attempt.
     df_designs = df_all_runs[df_all_runs["contact_check_passed"] & (df_all_runs[args.filter_metric] >= args.threshold)]
-    path_design_csv = os.path.join(args.path_output_dir, args.filename_output)
+    path_design_csv = os.path.join(get_run_dir(args), args.filename_output)
     df_designs.to_csv(path_design_csv, index = False)
     print(f"Saved {len(df_designs)} passing design(s) ({args.filter_metric} >= {args.threshold}) to {path_design_csv}")
     return path_design_csv
@@ -392,8 +398,8 @@ def main():
                         help = "Model to use for refinement.")
     parser.add_argument("design_name", type = str, 
                         help = "Name of the design to refine. This will be used to name the output files.")
-    parser.add_argument("path_output_dir", type = str, 
-                        help = "Path to the output directory where the refined designs will be saved.")
+    parser.add_argument("path_output_dir", type = str, nargs = "?", default = "outputs",
+                        help = "Parent folder for run outputs (default: outputs). This run's files go in <path_output_dir>/<design_name>/.")
 
     # Optional arguments
     parser.add_argument("--num_cycles", type = int, default = 5,
