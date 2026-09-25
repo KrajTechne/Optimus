@@ -322,6 +322,20 @@ def plot_cycle_metrics_png(cycle_history: list[dict], run_id: int, path_run_fold
     return path_png
 
 
+def save_run_config(args, filename: str = "run_config.yaml") -> str:
+    """
+    Writes every setting this run uses (the fully resolved args, e.g. the threshold default already filled in)
+    into the output folder, so a run's conditions can be recovered from its outputs alone. From the Modal
+    entrypoint the file can be passed back to --config to rerun the condition (refiner() ignores its
+    path_output_dir key, which is derived from design_name). Reusing a design_name overwrites the previous
+    run's file.
+    """
+    os.makedirs(args.path_output_dir, exist_ok = True)
+    path_config = os.path.join(args.path_output_dir, filename)
+    with open(path_config, "w", encoding = "utf-8") as f:
+        yaml.safe_dump(vars(args), f, sort_keys = False)
+    return path_config
+
 def iterate_over_design_count(args) -> pd.DataFrame:
     """ Run the cycling process for N design attempts and each one has K cycles"""
     all_cycle_records = []  # tall (run_id, cycle, <every analyze_structure() metric>) history, all design attempts
@@ -426,6 +440,7 @@ def main():
                                "way to invoke AF3/OpenFold3's own separate Modal image).")
     args = parser.parse_args()
     args.threshold = resolve_threshold(args.filter_metric, args.threshold)
+    save_run_config(args)
 
     path_design_csv = iterate_over_design_count(args = args)
 

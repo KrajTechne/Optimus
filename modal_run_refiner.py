@@ -37,7 +37,7 @@ def _run_refiner_body(model_name: str, seq_binder: str, seq_target: str, design_
                        num_samples: int, search_msa_every_cycle: bool, ligands: str, msa_options: str,
                        epitope_residues: str, paratope_residues: str, fixed_residues: str, mpnn_temperature: float,
                        filename_output: str, filter_metric: str, threshold: float, run_validation: str, seed: int = 0,
-                       seed_mpnn: int = None) -> str:
+                       seed_mpnn: int = None, gpu_type: str = GPU_TYPE) -> str:
     """
     Shared body for both run_refiner_esm_boltz and run_refiner_opendde — Modal binds a function's
     image at decoration time, not call time, so there's no way for one @app.function to pick its
@@ -53,7 +53,7 @@ def _run_refiner_body(model_name: str, seq_binder: str, seq_target: str, design_
     on one code path instead of two that can drift out of sync (as run_refine_cycle's design_count
     param did against this function before an earlier fix).
     """
-    from refiner import iterate_over_design_count, resolve_threshold
+    from refiner import iterate_over_design_count, resolve_threshold, save_run_config
 
     path_output_dir = f"{OUTPUTS_MOUNT}/{design_name}"
 
@@ -83,7 +83,11 @@ def _run_refiner_body(model_name: str, seq_binder: str, seq_target: str, design_
         run_validation=run_validation,
         seed=seed,
         seed_mpnn=seed_mpnn,
+        gpu_type=gpu_type,  # only recorded in run_config.yaml; the GPU itself was already chosen via with_options()
     )
+    # Committed right away (not only when the function returns) so the config survives a timed-out run.
+    save_run_config(args)
+    outputs_volume.commit()
     path_design_csv = iterate_over_design_count(args=args)
     if run_validation:
         _run_af3_validation(args=args, path_design_csv=path_design_csv)
@@ -100,7 +104,7 @@ def run_refiner_esm_boltz(model_name: str, seq_binder: str, seq_target: str, des
                            num_samples: int = 1, search_msa_every_cycle: bool = True, ligands: str = "", msa_options: str = "",
                            epitope_residues: str = "", paratope_residues: str = "", fixed_residues: str = "", mpnn_temperature: float = 0.10,
                            filename_output: str = "top_designs.csv", filter_metric: str = "iptm", threshold: float = None,
-                           run_validation: str = "", seed: int = 0, seed_mpnn: int = None) -> str:
+                           run_validation: str = "", seed: int = 0, seed_mpnn: int = None, gpu_type: str = GPU_TYPE) -> str:
     """model_name in {'ESMFold2', 'ESMFold2-Fast', 'Boltz2'} — see refiner()'s dispatch below."""
     path_design_csv = _run_refiner_body(
         model_name=model_name, seq_binder=seq_binder, seq_target=seq_target, design_name=design_name,
@@ -109,6 +113,7 @@ def run_refiner_esm_boltz(model_name: str, seq_binder: str, seq_target: str, des
         epitope_residues=epitope_residues, paratope_residues=paratope_residues, fixed_residues=fixed_residues,
         mpnn_temperature=mpnn_temperature, filename_output=filename_output,
         filter_metric=filter_metric, threshold=threshold, run_validation=run_validation, seed=seed, seed_mpnn=seed_mpnn,
+        gpu_type=gpu_type,
     )
     outputs_volume.commit()
     boltz_cache_volume.commit()
@@ -125,7 +130,7 @@ def run_refiner_opendde(model_name: str, seq_binder: str, seq_target: str, desig
                          num_samples: int = 1, search_msa_every_cycle: bool = True, ligands: str = "", msa_options: str = "",
                          epitope_residues: str = "", paratope_residues: str = "", fixed_residues: str = "", mpnn_temperature: float = 0.10,
                          filename_output: str = "top_designs.csv", filter_metric: str = "iptm", threshold: float = None,
-                         run_validation: str = "", seed: int = 0, seed_mpnn: int = None) -> str:
+                         run_validation: str = "", seed: int = 0, seed_mpnn: int = None, gpu_type: str = GPU_TYPE) -> str:
     """model_name == 'OpenDDE' — see refiner()'s dispatch below."""
     path_design_csv = _run_refiner_body(
         model_name=model_name, seq_binder=seq_binder, seq_target=seq_target, design_name=design_name,
@@ -134,6 +139,7 @@ def run_refiner_opendde(model_name: str, seq_binder: str, seq_target: str, desig
         epitope_residues=epitope_residues, paratope_residues=paratope_residues, fixed_residues=fixed_residues,
         mpnn_temperature=mpnn_temperature, filename_output=filename_output,
         filter_metric=filter_metric, threshold=threshold, run_validation=run_validation, seed=seed, seed_mpnn=seed_mpnn,
+        gpu_type=gpu_type,
     )
     outputs_volume.commit()
     opendde_cache_volume.commit()
@@ -153,7 +159,7 @@ def run_refiner_alphafold3(model_name: str, seq_binder: str, seq_target: str, de
                             num_samples: int = 1, search_msa_every_cycle: bool = True, ligands: str = "", msa_options: str = "",
                             epitope_residues: str = "", paratope_residues: str = "", fixed_residues: str = "", mpnn_temperature: float = 0.10,
                             filename_output: str = "top_designs.csv", filter_metric: str = "iptm", threshold: float = None,
-                            run_validation: str = "", seed: int = 0, seed_mpnn: int = None) -> str:
+                            run_validation: str = "", seed: int = 0, seed_mpnn: int = None, gpu_type: str = GPU_TYPE) -> str:
     """model_name in {'AlphaFold3', 'OpenFold3'} — see refiner()'s dispatch below."""
     path_design_csv = _run_refiner_body(
         model_name=model_name, seq_binder=seq_binder, seq_target=seq_target, design_name=design_name,
@@ -162,6 +168,7 @@ def run_refiner_alphafold3(model_name: str, seq_binder: str, seq_target: str, de
         epitope_residues=epitope_residues, paratope_residues=paratope_residues, fixed_residues=fixed_residues,
         mpnn_temperature=mpnn_temperature, filename_output=filename_output,
         filter_metric=filter_metric, threshold=threshold, run_validation=run_validation, seed=seed, seed_mpnn=seed_mpnn,
+        gpu_type=gpu_type,
     )
     outputs_volume.commit()
     return path_design_csv
@@ -179,6 +186,9 @@ def refiner(config: str = "", model_name: str = "", seq_binder: str = "", seq_ta
     # passed" apart from "using the default" for a partial-override scheme.
     if config:
         kwargs = load_config(config)
+        # A run's own run_config.yaml records path_output_dir; it is derived from design_name here, so drop it
+        # to let that file be passed straight back in as --config.
+        kwargs.pop("path_output_dir", None)
         missing = [k for k in ("model_name", "seq_binder", "seq_target", "design_name") if k not in kwargs]
         if missing:
             raise ValueError(f"--config file is missing required field(s): {missing}")
@@ -194,11 +204,10 @@ def refiner(config: str = "", model_name: str = "", seq_binder: str = "", seq_ta
             threshold=threshold, run_validation=run_validation, gpu_type=gpu_type, seed=seed, seed_mpnn=seed_mpnn,
         )
 
-    # gpu_type is applied via .with_options(gpu=...) rather than left in kwargs — Modal binds gpu=
-    # at decoration time on the @app.function itself, so overriding it per call needs with_options()
-    # to rebind a fresh callable rather than being a parameter run_refiner_esm_boltz/run_refiner_opendde
-    # accept directly; popped out here since neither function's own signature has a gpu_type param.
-    gpu_type = kwargs.pop("gpu_type", GPU_TYPE)
+    # gpu_type is applied via .with_options(gpu=...) — Modal binds gpu= at decoration time on the
+    # @app.function itself, so overriding it per call needs with_options() to rebind a fresh callable.
+    # It also stays in kwargs (the loop functions accept it) so run_config.yaml records it.
+    gpu_type = kwargs.setdefault("gpu_type", GPU_TYPE)
 
     # 1. Pick Structure Prediction Model of Interest for Refinement & Use its respective setup image
     if kwargs["model_name"] == "OpenDDE":
@@ -258,7 +267,9 @@ def _run_af3_validation(args, path_design_csv: str) -> None:
         (use_af3_weights, row.seq_binder, row.seq_target, row.ligands, "", row.design_name, path_validation_dir)
         for row in df_designs.itertuples()
     ]
-    af3_results = run_alphafold3.starmap(rows)
+    # Same GPU as the refinement loop when called from it; run_validation_only's args has no gpu_type, so
+    # standalone re-validation uses the default.
+    af3_results = run_alphafold3.with_options(gpu=getattr(args, "gpu_type", GPU_TYPE)).starmap(rows)
     best_rows = [max(samples, key=lambda d: d["iptm"]) for samples in af3_results]
     df_af3 = pd.DataFrame(best_rows).add_prefix("af3_")
 
