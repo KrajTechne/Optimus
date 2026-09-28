@@ -55,7 +55,8 @@ def _run_refiner_body(model_name: str, seq_binder: str, seq_target: str, design_
                        num_samples: int, search_msa_every_cycle: bool, ligands: str, msa_options: str,
                        epitope_residues: str, paratope_residues: str, fixed_residues: str, mpnn_temperature: float,
                        filename_output: str, filter_metric: str, threshold: float, run_validation: str, seed: int = 0,
-                       seed_mpnn: int = None, gpu_type: str = GPU_TYPE, path_output_dir: str = "") -> str:
+                       seed_mpnn: int = None, gpu_type: str = GPU_TYPE, path_output_dir: str = "",
+                       validation_seed: int = 0) -> str:
     """
     Shared body for both run_refiner_esm_boltz and run_refiner_opendde — Modal binds a function's
     image at decoration time, not call time, so there's no way for one @app.function to pick its
@@ -104,6 +105,7 @@ def _run_refiner_body(model_name: str, seq_binder: str, seq_target: str, design_
         run_validation=run_validation,
         seed=seed,
         seed_mpnn=seed_mpnn,
+        validation_seed=validation_seed,
         gpu_type=gpu_type,  # only recorded in run_config.yaml; the GPU itself was already chosen via with_options()
     )
     # Committed right away (not only when the function returns) so the config survives a timed-out run.
@@ -126,7 +128,7 @@ def run_refiner_esm_boltz(model_name: str, seq_binder: str, seq_target: str, des
                            epitope_residues: str = "", paratope_residues: str = "", fixed_residues: str = "", mpnn_temperature: float = 0.10,
                            filename_output: str = "top_designs.csv", filter_metric: str = "iptm", threshold: float = None,
                            run_validation: str = "", seed: int = 0, seed_mpnn: int = None, gpu_type: str = GPU_TYPE,
-                           path_output_dir: str = "") -> str:
+                           path_output_dir: str = "", validation_seed: int = 0) -> str:
     """model_name in {'ESMFold2', 'ESMFold2-Fast', 'Boltz2'} — see refiner()'s dispatch below."""
     path_design_csv = _run_refiner_body(
         model_name=model_name, seq_binder=seq_binder, seq_target=seq_target, design_name=design_name,
@@ -135,7 +137,7 @@ def run_refiner_esm_boltz(model_name: str, seq_binder: str, seq_target: str, des
         epitope_residues=epitope_residues, paratope_residues=paratope_residues, fixed_residues=fixed_residues,
         mpnn_temperature=mpnn_temperature, filename_output=filename_output,
         filter_metric=filter_metric, threshold=threshold, run_validation=run_validation, seed=seed, seed_mpnn=seed_mpnn,
-        gpu_type=gpu_type, path_output_dir=path_output_dir,
+        gpu_type=gpu_type, path_output_dir=path_output_dir, validation_seed=validation_seed,
     )
     outputs_volume.commit()
     boltz_cache_volume.commit()
@@ -153,7 +155,7 @@ def run_refiner_opendde(model_name: str, seq_binder: str, seq_target: str, desig
                          epitope_residues: str = "", paratope_residues: str = "", fixed_residues: str = "", mpnn_temperature: float = 0.10,
                          filename_output: str = "top_designs.csv", filter_metric: str = "iptm", threshold: float = None,
                          run_validation: str = "", seed: int = 0, seed_mpnn: int = None, gpu_type: str = GPU_TYPE,
-                         path_output_dir: str = "") -> str:
+                         path_output_dir: str = "", validation_seed: int = 0) -> str:
     """model_name == 'OpenDDE' — see refiner()'s dispatch below."""
     path_design_csv = _run_refiner_body(
         model_name=model_name, seq_binder=seq_binder, seq_target=seq_target, design_name=design_name,
@@ -162,7 +164,7 @@ def run_refiner_opendde(model_name: str, seq_binder: str, seq_target: str, desig
         epitope_residues=epitope_residues, paratope_residues=paratope_residues, fixed_residues=fixed_residues,
         mpnn_temperature=mpnn_temperature, filename_output=filename_output,
         filter_metric=filter_metric, threshold=threshold, run_validation=run_validation, seed=seed, seed_mpnn=seed_mpnn,
-        gpu_type=gpu_type, path_output_dir=path_output_dir,
+        gpu_type=gpu_type, path_output_dir=path_output_dir, validation_seed=validation_seed,
     )
     outputs_volume.commit()
     opendde_cache_volume.commit()
@@ -183,7 +185,7 @@ def run_refiner_alphafold3(model_name: str, seq_binder: str, seq_target: str, de
                             epitope_residues: str = "", paratope_residues: str = "", fixed_residues: str = "", mpnn_temperature: float = 0.10,
                             filename_output: str = "top_designs.csv", filter_metric: str = "iptm", threshold: float = None,
                             run_validation: str = "", seed: int = 0, seed_mpnn: int = None, gpu_type: str = GPU_TYPE,
-                            path_output_dir: str = "") -> str:
+                            path_output_dir: str = "", validation_seed: int = 0) -> str:
     """model_name in {'AlphaFold3', 'OpenFold3'} — see refiner()'s dispatch below."""
     path_design_csv = _run_refiner_body(
         model_name=model_name, seq_binder=seq_binder, seq_target=seq_target, design_name=design_name,
@@ -192,7 +194,7 @@ def run_refiner_alphafold3(model_name: str, seq_binder: str, seq_target: str, de
         epitope_residues=epitope_residues, paratope_residues=paratope_residues, fixed_residues=fixed_residues,
         mpnn_temperature=mpnn_temperature, filename_output=filename_output,
         filter_metric=filter_metric, threshold=threshold, run_validation=run_validation, seed=seed, seed_mpnn=seed_mpnn,
-        gpu_type=gpu_type, path_output_dir=path_output_dir,
+        gpu_type=gpu_type, path_output_dir=path_output_dir, validation_seed=validation_seed,
     )
     outputs_volume.commit()
     return path_design_csv
@@ -204,7 +206,7 @@ def refiner(config: str = "", model_name: str = "", seq_binder: str = "", seq_ta
             ligands: str = "", epitope_residues: str = "", paratope_residues: str = "", fixed_residues: str = "",
             mpnn_temperature: float = 0.10, msa_options: str = "", filename_output: str = "top_designs.csv",
             filter_metric: str = "iptm", threshold: float = None, run_validation: str = "", gpu_type: str = GPU_TYPE,
-            seed: int = 0, seed_mpnn: int = None, path_output_dir: str = ""):
+            seed: int = 0, seed_mpnn: int = None, path_output_dir: str = "", validation_seed: int = 0):
     # --config, when given, replaces every other flag entirely (not merged with them) — simplest to
     # reason about, and avoids needing None-sentinel defaults everywhere just to tell "explicitly
     # passed" apart from "using the default" for a partial-override scheme.
@@ -223,7 +225,7 @@ def refiner(config: str = "", model_name: str = "", seq_binder: str = "", seq_ta
             epitope_residues=epitope_residues, paratope_residues=paratope_residues, fixed_residues=fixed_residues,
             mpnn_temperature=mpnn_temperature, filename_output=filename_output, filter_metric=filter_metric,
             threshold=threshold, run_validation=run_validation, gpu_type=gpu_type, seed=seed, seed_mpnn=seed_mpnn,
-            path_output_dir=path_output_dir,
+            path_output_dir=path_output_dir, validation_seed=validation_seed,
         )
     # Fail here, before any GPU is started, if the folder would fall outside the volume.
     _resolve_output_subdir(kwargs.get("path_output_dir", ""))
@@ -300,9 +302,15 @@ def _run_af3_validation(args, path_design_csv: str) -> None:
         (use_af3_weights, row.seq_binder, row.seq_target, row.ligands, "", row.design_name, path_validation_dir)
         for row in df_designs.itertuples()
     ]
+    # validation_seed is separate from args.seed (the seed the *generating* model used, e.g. for an AF3/OpenFold3
+    # refiner run) — the receptor's own predicted conformation is seed-sensitive, so this controls that
+    # independently of whatever seed produced the designs being validated. Fixed across the whole batch, so
+    # passed via starmap's kwargs= rather than repeated in every row tuple.
     # Same GPU as the refinement loop when called from it; run_validation_only's args has no gpu_type, so
     # standalone re-validation uses the default.
-    af3_results = run_alphafold3.with_options(gpu=getattr(args, "gpu_type", GPU_TYPE)).starmap(rows)
+    af3_results = run_alphafold3.with_options(gpu=getattr(args, "gpu_type", GPU_TYPE)).starmap(
+        rows, kwargs={"seed": getattr(args, "validation_seed", 0)}
+    )
     best_rows = [max(samples, key=lambda d: d["iptm"]) for samples in af3_results]
     df_af3 = pd.DataFrame(best_rows).add_prefix("af3_")
 
@@ -332,16 +340,17 @@ _validation_trigger_image = (
     timeout=TIMEOUT_SECONDS,
 )
 def run_validation_only(design_name: str, run_validation: str, filename_output: str = "top_designs.csv",
-                        path_output_dir: str = "") -> None:
+                        path_output_dir: str = "", validation_seed: int = 0) -> None:
     """
     Re-runs just the AF3 validation step against an existing top_designs.csv from a previous
     refiner run at the same design_name — without re-running the (expensive) refiner loop that
-    produced it. Useful for re-validating with different settings (e.g. run_validation weights, or
-    a run_alphafold3 change like the msa_options derivation) without redoing the ESMFold2/Boltz2/
-    OpenDDE side, which top_designs.csv's contents don't depend on.
+    produced it. Useful for re-validating with different settings (e.g. run_validation weights,
+    validation_seed, or a run_alphafold3 change like the msa_options derivation) without redoing
+    the ESMFold2/Boltz2/OpenDDE side, which top_designs.csv's contents don't depend on.
     """
     path_parent = os.path.join(OUTPUTS_MOUNT, _resolve_output_subdir(path_output_dir))
-    args = SimpleNamespace(path_output_dir=path_parent, design_name=design_name, run_validation=run_validation)
+    args = SimpleNamespace(path_output_dir=path_parent, design_name=design_name, run_validation=run_validation,
+                           validation_seed=validation_seed)
     path_design_csv = os.path.join(path_parent, design_name, filename_output)
     _run_af3_validation(args=args, path_design_csv=path_design_csv)
     outputs_volume.commit()
@@ -349,7 +358,7 @@ def run_validation_only(design_name: str, run_validation: str, filename_output: 
 
 @app.local_entrypoint()
 def validate(config: str = "", design_name: str = "", run_validation: str = "of3", filename_output: str = "top_designs.csv",
-             path_output_dir: str = ""):
+             path_output_dir: str = "", validation_seed: int = 0):
     if config:
         kwargs = load_config(config)
         if "design_name" not in kwargs:
@@ -358,7 +367,7 @@ def validate(config: str = "", design_name: str = "", run_validation: str = "of3
         if not design_name:
             raise ValueError("design_name is required unless --config is given")
         kwargs = dict(design_name=design_name, run_validation=run_validation, filename_output=filename_output,
-                      path_output_dir=path_output_dir)
+                      path_output_dir=path_output_dir, validation_seed=validation_seed)
     _resolve_output_subdir(kwargs.get("path_output_dir", ""))  # fail before starting anything if outside the volume
     # .spawn(), same reasoning as refiner()'s own call.
     call = run_validation_only.spawn(**kwargs)

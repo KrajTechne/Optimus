@@ -30,3 +30,6 @@ seed_mpnn: null
 # Folder inside the Modal outputs volume that groups runs: this run writes to <path_output_dir>/<design_name>/.
 # Blank = the volume root. Must be a relative folder (no leading / and no ..).
 path_output_dir: ""
+# Structure-model seed for the of3/native_af3 validation step only — separate from seed above. The receptor's
+# predicted conformation is seed-sensitive, so worth setting explicitly rather than AF3's default.
+validation_seed: 0

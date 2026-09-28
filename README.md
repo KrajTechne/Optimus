@@ -143,6 +143,7 @@ This mainly exists to avoid shell-quoting headaches with sequence strings and co
 | `--filter_metric` | `iptm` | `iptm` or `ipsae_min` — which metric gates a passing cycle |
 | `--threshold` | `0.8` (iptm) / `0.61` (ipsae_min) | Minimum `--filter_metric` value to pass |
 | `--run_validation` | `""` | `""` (skip), `native_af3`, or `of3` — only takes effect via `modal_run_refiner.py`, not plain `python refiner.py` |
+| `--validation_seed` | 0 | Structure-model seed for the validation step only, separate from `--seed`. The receptor's own predicted conformation is seed-sensitive, so this is worth setting explicitly rather than relying on AF3's default (`modal_run_refiner.py::validate` also takes it, to re-validate an existing `top_designs.csv` without rerunning the refiner loop) |
 
 ## Output
 
