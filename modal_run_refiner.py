@@ -240,8 +240,16 @@ def refiner(config: str = "", model_name: str = "", seq_binder: str = "", seq_ta
         run_fn = run_refiner_alphafold3
     else:
         run_fn = run_refiner_esm_boltz
-    path_design_csv = run_fn.with_options(gpu=gpu_type).remote(**kwargs)
-    print(path_design_csv)
+    # .spawn() (not .remote()) so this local process can exit right away: .remote() blocks the local
+    # client until the whole run finishes, and if that local process dies partway through — closed
+    # terminal, logoff, network drop — the run dies with it even under --detach (confirmed 2026-09-25:
+    # 8 detached .remote() runs all stopped mid-run, at the same wall-clock time, right after the client
+    # machine logged off). .spawn() decouples the run from this connection from the moment it starts;
+    # --detach then keeps the app itself alive after this entrypoint returns.
+    call = run_fn.with_options(gpu=gpu_type).spawn(**kwargs)
+    subdir = kwargs.get("path_output_dir") or "(volume root)"
+    print(f"Spawned {kwargs['design_name']} as function call {call.object_id} — runs independently of this "
+          f"terminal now. Check progress via `modal app list` or the outputs volume under {subdir}/{kwargs['design_name']}/.")
 
 
 def _run_af3_validation(args, path_design_csv: str) -> None:
@@ -352,4 +360,7 @@ def validate(config: str = "", design_name: str = "", run_validation: str = "of3
         kwargs = dict(design_name=design_name, run_validation=run_validation, filename_output=filename_output,
                       path_output_dir=path_output_dir)
     _resolve_output_subdir(kwargs.get("path_output_dir", ""))  # fail before starting anything if outside the volume
-    run_validation_only.remote(**kwargs)
+    # .spawn(), same reasoning as refiner()'s own call.
+    call = run_validation_only.spawn(**kwargs)
+    print(f"Spawned validation for {kwargs['design_name']} as function call {call.object_id} — "
+          f"runs independently of this terminal now.")
