@@ -59,6 +59,7 @@ This is a general binder-target interface check; it does not on its own confirm 
 | `Run{ESMFold2,Boltz2,OpenDDE,AlphaFold3}.py` | Per-model structure-prediction integrations |
 | `StructurePredictionInputs.py` | Shared base class (inputs, output-dir handling) all four models inherit from |
 | `StrucTools.py` | Structure analysis utilities — binding-interface/contact determination, ipSAE, structure I/O |
+| `designs_from_structures.py` | Builds a validation input CSV (sequences, ligand SMILES, reference interface) from a folder of `.pdb`/`.cif` complexes |
 | `LigandMPNN/` | Sequence design (vendored) |
 | `mmseqs2.py` | MSA generation via the ColabFold-hosted MMseqs2 API |
 | `configs/` | Example `--config` files for `refiner` and `predict` |

@@ -339,6 +339,24 @@ def determine_binding_interface(pdb_file_path: str, hotspots: list, binder_chain
     return contact_information
 
 
+def interface_positions(atoms, binder_chain: str, target_chain: str, cutoff: float = 4.5) -> tuple[list, list]:
+    """
+    Paratope and epitope as 1-indexed sequence positions (rank of the residue among that chain's amino acids,
+    the numbering a structure predictor sees when re-predicting the extracted sequence), not file residue IDs.
+    Same contact definition as determine_binding_interface(): heavy atoms within `cutoff` of each other.
+    """
+    def chain_atoms(chain):
+        chain_array = atoms[(atoms.chain_id == chain) & struc.filter_amino_acids(atoms) & (atoms.element != "H")]
+        return chain_array, struc.get_residue_positions(chain_array, np.arange(chain_array.array_length()))
+
+    binder, binder_pos = chain_atoms(binder_chain)
+    target, target_pos = chain_atoms(target_chain)
+    contacts = struc.CellList(target, cell_size=cutoff).get_atoms(binder.coord, radius=cutoff, as_mask=True)
+    paratope = np.unique(binder_pos[contacts.any(axis=1)]) + 1
+    epitope = np.unique(target_pos[contacts.any(axis=0)]) + 1
+    return paratope.tolist(), epitope.tolist()
+
+
 def binder_binds_contacts(metrics: dict, target_chain: str, epitope_residues: str = "", paratope_residues: str = "") -> bool:
     """
     Pass/fail contact rule for one target chain, read from the indices determine_binding_interface() stored in
