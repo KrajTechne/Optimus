@@ -54,8 +54,9 @@ This is a general binder-target interface check; it does not on its own confirm 
 |---|---|
 | `refiner.py` | Core refinement loop, CLI entrypoint (`python refiner.py ...`), plotting |
 | `modal_run_refiner.py` | Cloud execution on [Modal](https://modal.com) — per-model-family images/functions, plus the validation step |
+| `modal_run_validation.py` | Validate any CSV of designs (e.g. from `designs_from_structures.py`) with several models and seeds on Modal |
 | `modal_run_structure_prediction.py` | One-off (single-shot) structure prediction on Modal — no refinement cycles or sequence redesign |
-| `modal_common.py` | Shared Modal setup: app, per-model images, volumes, timeout, `--config` loading, and the AlphaFold3/OpenFold3 function |
+| `modal_common.py` | Shared Modal setup: app, per-model images, volumes, timeout, `--config` loading, output-folder checks, the AlphaFold3/OpenFold3 function, and the validation job runner |
 | `Run{ESMFold2,Boltz2,OpenDDE,AlphaFold3}.py` | Per-model structure-prediction integrations |
 | `StructurePredictionInputs.py` | Shared base class (inputs, output-dir handling) all four models inherit from |
 | `StrucTools.py` | Structure analysis utilities — binding-interface/contact determination, ipSAE, structure I/O |

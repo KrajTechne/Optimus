@@ -20,7 +20,6 @@ here, so modal_run_structure_prediction.py's one-off predictions can reuse it to
 this file directly.
 """
 import os
-import posixpath
 from types import SimpleNamespace
 
 import modal
@@ -31,24 +30,8 @@ from modal_common import (
     BOLTZ_CACHE_MOUNT, boltz_cache_volume,
     OPENDDE_CACHE_MOUNT, opendde_cache_volume,
     refiner_esmfold2_boltz2_image, refiner_opendde_image, refiner_alphafold3_image,
-    run_alphafold3,
+    run_alphafold3, resolve_output_subdir as _resolve_output_subdir,
 )
-
-
-def _resolve_output_subdir(path_output_dir) -> str:
-    """
-    path_output_dir on Modal is a folder inside the outputs volume that groups runs: each run writes to
-    {OUTPUTS_MOUNT}/{path_output_dir}/{design_name}/. Blank (default) means the volume root. Absolute paths and
-    ".." are rejected, since anything outside the mounted volume would not persist after the run.
-    Returns the normalized volume-relative folder ("" for the root).
-    """
-    raw = (path_output_dir or "").strip().replace("\\", "/")
-    parts = raw.split("/")
-    if raw.startswith("/") or ":" in parts[0] or ".." in parts:
-        raise ValueError(f"path_output_dir must be a folder inside the outputs volume (e.g. 'my_sweep'), "
-                         f"not an absolute path or one containing '..': {path_output_dir!r}")
-    subdir = posixpath.normpath(raw) if raw else ""
-    return "" if subdir == "." else subdir
 
 
 def _run_refiner_body(model_name: str, seq_binder: str, seq_target: str, design_name: str, num_cycles: int, num_designs: int,
