@@ -55,12 +55,27 @@ This is a general binder-target interface check; it does not on its own confirm 
 | `refiner.py` | Core refinement loop, CLI entrypoint (`python refiner.py ...`), plotting |
 | `modal_run_refiner.py` | Cloud execution on [Modal](https://modal.com) — per-model-family images/functions, plus the validation step |
 | `modal_run_structure_prediction.py` | One-off (single-shot) structure prediction on Modal — no refinement cycles or sequence redesign |
+| `modal_common.py` | Shared Modal setup: app, per-model images, volumes, timeout, `--config` loading, and the AlphaFold3/OpenFold3 function |
 | `Run{ESMFold2,Boltz2,OpenDDE,AlphaFold3}.py` | Per-model structure-prediction integrations |
 | `StructurePredictionInputs.py` | Shared base class (inputs, output-dir handling) all four models inherit from |
 | `StrucTools.py` | Structure analysis utilities — binding-interface/contact determination, ipSAE, structure I/O |
 | `LigandMPNN/` | Sequence design (vendored) |
 | `mmseqs2.py` | MSA generation via the ColabFold-hosted MMseqs2 API |
-| `*_MSA_Experiments/`, `ESMFold2_AF3_Validation_Experiments/` | Written-up findings from specific experiments run against this pipeline |
+| `configs/` | Example `--config` files for `refiner` and `predict` |
+| `tests/`, `pytest.ini` | Unit tests (run with `pytest`) and their config |
+| `requirements.txt` | Local Python environment (see Setup); the Modal images pin their own dependencies |
+| `Experiments/` | Written-up findings from specific experiments run against this pipeline |
+
+## Setup
+
+Python 3.12. This installs the local tooling (Modal client, structure and ligand libraries); the Modal images carry their own pinned dependencies.
+
+```
+python -m venv .venv
+.venv\Scripts\activate          # macOS/Linux: source .venv/bin/activate
+pip install -r requirements.txt     # includes pytest; run the tests with: pytest
+modal setup                         # one-time Modal login
+```
 
 ## Usage
 
