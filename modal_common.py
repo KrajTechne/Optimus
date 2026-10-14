@@ -273,6 +273,64 @@ def run_alphafold3(
     return df_metrics.to_dict(orient="records")
 
 
+@app.function(
+    image=refiner_esmfold2_boltz2_image,
+    gpu=GPU_TYPE,
+    volumes={OUTPUTS_MOUNT: outputs_volume},
+    timeout=TIMEOUT_SECONDS,
+)
+def run_esmfold2(
+    seq_binder: str,
+    seq_target: str,
+    ligands: str = "",
+    msa_options: str = "",
+    design_name: str = "",
+    path_output_dir: str = "",
+    num_samples: int = 5,
+    seed: int = 0,
+) -> list[dict]:
+    """
+    ESMFold2 counterpart of run_alphafold3 for the validation entrypoint: one design, one seed, num_samples
+    diffusion samples; returns one metrics dict per sample. Everything is written directly into path_output_dir
+    (the job's own folder): sample<N>.cif, sample<N>_pae.npz, msa/, input.yaml, all_models_metrics.csv.
+
+    Not predict_esm_boltz: that writes to a fixed /outputs/<design_name> and has no output-dir parameter. The MSA
+    folder lives inside path_output_dir because ESMFold2 caches MSAs by chain letter, not by sequence; a folder
+    shared between jobs could silently reuse another design's target MSA (reuse_msa=False for the same reason on
+    reruns into an existing folder).
+    """
+    import pandas as pd
+    import yaml
+    from RunESMFold2 import RunESMFold2
+
+    num_chains = 1 + len(seq_target.split(","))
+    # Same default as run_alphafold3: binder unsearched, every target chain searched.
+    if msa_options == "":
+        msa_options = ",".join(["empty"] + [""] * (num_chains - 1))
+    design = RunESMFold2(
+        design_name=design_name,
+        seq_list=[seq_binder] + seq_target.split(","),
+        msa_options=msa_options.split(","),
+        entity_types=["protein"] * num_chains,
+        ligand_list=ligands.split(",") if ligands else [],
+        num_samples=num_samples,
+        seed=seed,
+        path_output_dir=path_output_dir,
+        reuse_msa=False,
+    )
+    predictions, input_yaml = design.predict_structure()
+    if num_samples == 1:
+        predictions = [predictions]  # a single sample comes back unwrapped
+    with open(os.path.join(path_output_dir, "input.yaml"), "w") as f:
+        yaml.dump(input_yaml, f)
+    metrics = [design.analyze_structure(prediction, model_id=i, path_structure=os.path.join(path_output_dir, f"sample{i}.cif"))
+               for i, prediction in enumerate(predictions)]
+    df_metrics = pd.DataFrame(metrics)
+    df_metrics.to_csv(os.path.join(path_output_dir, "all_models_metrics.csv"), index=False)
+    outputs_volume.commit()
+    return df_metrics.to_dict(orient="records")
+
+
 def resolve_output_subdir(path_output_dir) -> str:
     """
     path_output_dir on Modal is a folder inside the outputs volume that groups runs: each run writes to
@@ -292,7 +350,7 @@ def resolve_output_subdir(path_output_dir) -> str:
 # ---------------------------------------------------------------------------
 # Validation of arbitrary designs: design x model x seed jobs, collected into one results folder
 # ---------------------------------------------------------------------------
-SUPPORTED_VALIDATION_MODELS = ("of3", "native_af3")
+SUPPORTED_VALIDATION_MODELS = ("of3", "native_af3", "esmfold2")
 
 
 def _spawn_validation_job(job: dict, path_job: str, gpu_type: str):
@@ -305,6 +363,10 @@ def _spawn_validation_job(job: dict, path_job: str, gpu_type: str):
             use_af3_weights=(job["model"] == "native_af3"), seq_binder=job["seq_binder"], seq_target=job["seq_target"],
             ligands=job["ligands"], design_name=label, path_output_dir=path_design,
             num_samples=job["num_samples"], seed=job["seed"])
+    if job["model"] == "esmfold2":
+        return run_esmfold2.with_options(gpu=gpu_type).spawn(
+            seq_binder=job["seq_binder"], seq_target=job["seq_target"], ligands=job["ligands"],
+            design_name=job["design_name"], path_output_dir=path_job, num_samples=job["num_samples"], seed=job["seed"])
     raise ValueError(f"model {job['model']!r} is not supported yet; supported: {SUPPORTED_VALIDATION_MODELS}")
 
 
