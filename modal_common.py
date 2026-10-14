@@ -298,10 +298,12 @@ SUPPORTED_VALIDATION_MODELS = ("of3", "native_af3")
 def _spawn_validation_job(job: dict, path_job: str, gpu_type: str):
     """Start one validation job on its model's own function/image; returns the FunctionCall."""
     if job["model"] in ("of3", "native_af3"):
-        # path_job is this job's own folder; AlphaFold3 nests {design_name}/seed-N_sample-k/ below it.
+        # AlphaFold3 writes {path_output_dir}/{design_name}/seed-N_sample-k/, so the job's own folder name
+        # (e.g. of3_seed1) is passed as its run name and the design's folder as its parent: <out>/<design>/of3_seed1/.
+        path_design, label = os.path.split(path_job)
         return run_alphafold3.with_options(gpu=gpu_type).spawn(
             use_af3_weights=(job["model"] == "native_af3"), seq_binder=job["seq_binder"], seq_target=job["seq_target"],
-            ligands=job["ligands"], design_name=job["design_name"], path_output_dir=path_job,
+            ligands=job["ligands"], design_name=label, path_output_dir=path_design,
             num_samples=job["num_samples"], seed=job["seed"])
     raise ValueError(f"model {job['model']!r} is not supported yet; supported: {SUPPORTED_VALIDATION_MODELS}")
 
@@ -357,7 +359,7 @@ def execute_validation(designs, models, seeds, num_samples: int, output_dir: str
                 best = max(samples, key=lambda sample: sample["iptm"])  # best sample by iptm, as in the refiner
                 scalars = {k: v for k, v in best.items() if isinstance(v, (str, int, float, bool)) or v is None}
                 rows.append({**scalars, **{k: job[k] for k in ("design_name", "model", "seed", "num_samples")},
-                             "path_job": os.path.join(output_dir, folder)})
+                             "design_id": folder.replace("/", "_"), "path_job": os.path.join(output_dir, folder)})
             del pending[key]
             finished_since_flush += 1
         if finished_since_flush >= flush_every or not pending:
