@@ -67,8 +67,10 @@ This is a general binder-target interface check; it does not on its own confirm 
 ### Locally
 
 ```
-python refiner.py <seq_binder> <seq_target> <model_name> <design_name> <path_output_dir> [options]
+python refiner.py <seq_binder> <seq_target> <model_name> <design_name> [path_output_dir] [options]
 ```
+
+`path_output_dir` (optional, default `outputs`) is the parent folder shared by runs; this run's files go in `<path_output_dir>/<design_name>/`.
 
 ### On Modal
 
@@ -133,6 +135,7 @@ This mainly exists to avoid shell-quoting headaches with sequence strings and co
 | `--num_designs` | 1 | Independent design attempts |
 | `--num_samples` | 1 | Structure-prediction samples per cycle (best-ranked kept) |
 | `--seed` | 0 | Structure-model seed (ESMFold2, OpenDDE; Boltz2 ignores it). Separate from `--seed_mpnn`. Does not make ESMFold2 fully reproducible |
+| `path_output_dir` (config key / `--path-output-dir` on Modal) | `""` | Folder inside the Modal outputs volume that groups runs: a run writes to `<path_output_dir>/<design_name>/`. Blank = the volume root. Must be a relative folder (no leading `/`, no `..`). Created automatically |
 | `--seed_mpnn` | random | MPNN sequence-design seed. Not given: a fresh random seed every cycle. Given: a base seed, with each design attempt/cycle using `seed_mpnn + 1000*design + cycle`. The seed used is recorded per cycle in the `seed_mpnn` column of `all_runs.csv` (empty for cycle 0) |
 | `--msa_options` | `""` | Comma-separated `empty`/`""` per chain — `"empty,"` = binder unsearched, target searched |
 | `--fixed_residues` | `""` | Space-separated residues (e.g. `A51 A52`) held constant during MPNN redesign |
@@ -140,10 +143,11 @@ This mainly exists to avoid shell-quoting headaches with sequence strings and co
 | `--filter_metric` | `iptm` | `iptm` or `ipsae_min` — which metric gates a passing cycle |
 | `--threshold` | `0.8` (iptm) / `0.61` (ipsae_min) | Minimum `--filter_metric` value to pass |
 | `--run_validation` | `""` | `""` (skip), `native_af3`, or `of3` — only takes effect via `modal_run_refiner.py`, not plain `python refiner.py` |
+| `--validation_seed` | 0 | Structure-model seed for the validation step only, separate from `--seed`. The receptor's own predicted conformation is seed-sensitive, so this is worth setting explicitly rather than relying on AF3's default (`modal_run_refiner.py::validate` also takes it, to re-validate an existing `top_designs.csv` without rerunning the refiner loop) |
 
 ## Output
 
-Written under `path_output_dir`:
+Written under `<path_output_dir>/<design_name>/` (the volume root is the default `path_output_dir` on Modal), including a `run_config.yaml` with every setting the run used (usable as a `--config` file to rerun it):
 
 | File/folder | Contents |
 |---|---|

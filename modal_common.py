@@ -32,7 +32,7 @@ def load_config(path: str) -> dict:
 # since Modal binds a function's gpu= at decoration time but with_options() rebinds it per call
 # without redefining the function or rebuilding its image.
 GPU_TYPE = "H100"
-TIMEOUT_SECONDS = 3 * 60 * 60
+TIMEOUT_SECONDS = 5 * 60 * 60
 
 # StructurePredictionInputs.py (base validation) and StrucTools.py (binding
 # interface / ipSAE helpers) are needed by both RunESMFold2 and RunBoltz2.
