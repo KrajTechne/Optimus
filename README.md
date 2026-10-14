@@ -189,6 +189,12 @@ The CSVs are rewritten every 10 finished jobs, so a timeout keeps the partial re
 - *Noise floor:* with 2+ seeds, `seed_paratope_jaccard` / `seed_epitope_jaccard` measure how much a model agrees with itself across seeds. Read a cross-model consistency of 0.8 against that.
 - *ESMFold2 is not an independent check of an ESMFold2 refinement*, and models disagree in absolute iptm even on the same input, so compare within a model first.
 
+**Known limitations.**
+- ESMFold2 jobs download the model weights (about 40 s) in every cold container; there is no weights cache volume. With many parallel containers this adds up.
+- Many jobs fetch the same target MSA from the ColabFold server at once. How it behaves under a large batch has not been tested.
+- When an AlphaFold3/OpenFold3 job fails, `failures.csv` shows only `CalledProcessError ... exit status 1`, not the underlying reason (ESMFold2 errors are readable). Look in that job's own logs.
+- Rerunning into an existing `--output-dir` (or re-running `validate` on a refiner run) overwrites `validation_results.csv`, `validation_summary.csv` and the validated CSV with the new run only; folders from earlier seeds stay on disk but drop out of the summaries.
+
 ### Using a config file instead of flags
 
 `refiner`, `validate`, `predict`, and `validate_designs` (the standalone validation above) all accept `--config <path.yaml|path.json>`. When `--config` is
@@ -235,5 +241,5 @@ Written under `<path_output_dir>/<design_name>/` (the volume root is the default
 | `top_designs.csv` (`--filename_output`) | Passing cycles only |
 | `runs/run_{N}/` | Per-cycle structures (`.cif`/`.pdb`), PAE, `cycle_metrics.png` |
 | `improved_insilico/` | PDB + input spec for every passing cycle |
-| `validation_{run_validation}/` | AlphaFold3/OpenFold3 structures from the validation step |
-| `top_designs_validated_{run_validation}.csv` | `top_designs.csv` merged with the validator's own metrics (`af3_`-prefixed) |
+| `validation_{run_validation}/` | The validation step's results in the standalone layout (see "Validating designs you already have"): `validation_results.csv`, `validation_summary.csv`, `failures.csv`, and one folder per design `<design_name>/<model>_seed<N>/`. A failed validation job no longer stops the run: check `failures.csv` |
+| `top_designs_validated_{run_validation}.csv` | `top_designs.csv` merged with the validator's own metrics (`val_`-prefixed, e.g. `val_iptm`, `val_model`, `val_contact_check_passed`, plus the interface-consistency columns); a design whose validation job failed has empty `val_` columns |

@@ -105,7 +105,7 @@ refiner_esmfold2_boltz2_image = (
     # add_local_python_source call disables Modal's implicit automount for that image — so whichever
     # script is passed to `modal run` needs modal_common itself declared here too, since both
     # entrypoint scripts import it at module level.
-    .add_local_python_source(*_SHARED_LOCAL_MODULES, "RunESMFold2", "RunBoltz2", "mmseqs2", "refiner", "modal_common")
+    .add_local_python_source(*_SHARED_LOCAL_MODULES, "RunESMFold2", "RunBoltz2", "mmseqs2", "refiner", "modal_common", "validation_core")
 )
 
 # Incompatabile torch dependencies between OpenDDE and ESMFold2: Specifically in pytorch version specs
@@ -127,7 +127,7 @@ refiner_opendde_image = (
     # only needs RunOpenDDE mountable, not RunESMFold2/RunBoltz2 — the OpenDDE branch is the
     # only one that will ever actually execute here.
     # modal_common listed explicitly for the same reason as refiner_esmfold2_boltz2_image above.
-    .add_local_python_source(*_SHARED_LOCAL_MODULES, "RunOpenDDE", "mmseqs2", "refiner", "modal_common")
+    .add_local_python_source(*_SHARED_LOCAL_MODULES, "RunOpenDDE", "mmseqs2", "refiner", "modal_common", "validation_core")
 )
 
 
@@ -202,7 +202,7 @@ refiner_alphafold3_image = (
     .pip_install("ProDy", "dm-tree", "ml-collections", "biopython", "matplotlib", "pyyaml")
     .add_local_dir("LigandMPNN", "/root/LigandMPNN", copy=True, ignore=["model_params", "*.pt"])
     .run_commands("bash /root/LigandMPNN/get_model_params.sh /root/LigandMPNN/model_params")
-    .add_local_python_source(*_SHARED_LOCAL_MODULES, "RunAlphaFold3", "refiner", "modal_common")
+    .add_local_python_source(*_SHARED_LOCAL_MODULES, "RunAlphaFold3", "refiner", "modal_common", "validation_core")
 )
 
 
@@ -225,7 +225,7 @@ def run_alphafold3(
     seed: int = 0,
 ) -> list[dict]:
     """
-    Shared by modal_run_refiner.py's own AF3/OpenFold3 validation step (_run_af3_validation) and
+    Shared by modal_run_refiner.py's own AF3/OpenFold3 validation step (_run_validation) and
     modal_run_structure_prediction.py's predict() dispatch — defined here (rather than in either of
     those two files) so neither one has to import the other just to reuse this one function.
     """
@@ -419,8 +419,9 @@ def execute_validation(designs, models, seeds, num_samples: int, output_dir: str
                 print(f"FAILED {folder}: {exc}")
             else:
                 best = max(samples, key=lambda sample: sample["iptm"])  # best sample by iptm, as in the refiner
-                scalars = {k: v for k, v in best.items() if isinstance(v, (str, int, float, bool)) or v is None}
-                rows.append({**scalars, **{k: job[k] for k in ("design_name", "model", "seed", "num_samples")},
+                # Every metric is kept, including AF3's short per-chain lists; its large per-atom arrays are already
+                # dropped by RunAlphaFold3.analyze_structure.
+                rows.append({**best, **{k: job[k] for k in ("design_name", "model", "seed", "num_samples")},
                              "design_id": folder.replace("/", "_"), "path_job": os.path.join(output_dir, folder)})
             del pending[key]
             finished_since_flush += 1

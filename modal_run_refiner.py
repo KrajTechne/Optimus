@@ -30,7 +30,7 @@ from modal_common import (
     BOLTZ_CACHE_MOUNT, boltz_cache_volume,
     OPENDDE_CACHE_MOUNT, opendde_cache_volume,
     refiner_esmfold2_boltz2_image, refiner_opendde_image, refiner_alphafold3_image,
-    run_alphafold3, resolve_output_subdir as _resolve_output_subdir,
+    run_alphafold3, execute_validation, resolve_output_subdir as _resolve_output_subdir,
 )
 
 
@@ -96,7 +96,7 @@ def _run_refiner_body(model_name: str, seq_binder: str, seq_target: str, design_
     outputs_volume.commit()
     path_design_csv = iterate_over_design_count(args=args)
     if run_validation:
-        _run_af3_validation(args=args, path_design_csv=path_design_csv)
+        _run_validation(args=args, path_design_csv=path_design_csv)
     return path_design_csv
 
 
@@ -237,72 +237,49 @@ def refiner(config: str = "", model_name: str = "", seq_binder: str = "", seq_ta
           f"terminal now. Check progress via `modal app list` or the outputs volume under {subdir}/{kwargs['design_name']}/.")
 
 
-def _run_af3_validation(args, path_design_csv: str) -> None:
+def _run_validation(args, path_design_csv: str) -> None:
     """
-    Validates every row in path_design_csv (top_designs.csv) against a structure-prediction model
-    separate from whichever one produced it (AF3 or OpenFold3, per args.run_validation) — called
-    from _run_refiner_body, so this runs entirely server-side: path_design_csv is already a real
-    filesystem path inside that container (OUTPUTS_MOUNT is mounted there), so reading it needs no
-    client round-trip, and run_alphafold3 is callable directly via .starmap() even though it's
-    bound to a completely different image (alphafold3_image, defined in modal_common.py) than the
-    caller's — Modal spins up the callee's own container type regardless of the caller's.
+    Validates every row of path_design_csv (top_designs.csv) with the model named by args.run_validation
+    (AF3 or OpenFold3), independent of whichever model produced the design. This is the same executor the
+    standalone modal_run_validation.py uses (modal_common.execute_validation), with one model and one seed
+    (args.validation_seed, separate from the seed the generating model used). It runs inside the caller's
+    container; the AF3 jobs run on their own images.
 
-    design_name is already unique per row (iterate_over_design_count sets it to
-    "{model_name}_design_run_{run_id}_cycle_{cycle}"), and AlphaFold3's own --force_output_dir CLI
-    flag (see RunAlphaFold3.predict_structure()) creates a {path_output_dir}/{design_name}/
-    subfolder per call — so passing one shared path_validation_dir as run_alphafold3's
-    path_output_dir is enough to keep every row's structure output in its own subfolder without
-    building any per-row path here.
-
-    Each design gets num_samples=5 diffusion samples from AF3 (run_alphafold3's own fixed default);
-    the best one by iptm is kept as AF3's verdict for that design, matching the refiner loop's own
-    "num_samples -> best-ranked one" convention elsewhere in this pipeline (RunESMFold2's
-    _best_structure, OpenDDE/Boltz2's own internal ranking) — so the comparison between the
-    generating model's score and AF3's score isn't confounded by AF3's per-call sampling noise.
+    Results land in <run>/validation_<model>/ in the standalone layout (validation_results.csv, validation_summary.csv,
+    failures.csv, one folder per job). top_designs_validated_<model>.csv keeps its original shape: top_designs.csv
+    plus every validator column with a "val_" prefix (the model is in val_model), merged by design_name, so a design whose
+    job failed has empty val_ columns (its error is in failures.csv).
     """
-    import os
     import pandas as pd
+    import validation_core as vc
 
-    # fillna("") since pandas reads an empty CSV cell (e.g. a row with no ligands) back as NaN, not
-    # "" — NaN is truthy in Python, so run_alphafold3's own `if ligands else []` would take the
-    # ligands.split(",") branch and crash calling .split on a float.
+    # fillna("") since pandas reads an empty CSV cell (e.g. a row with no ligands) back as NaN, not "".
     df_designs = pd.read_csv(path_design_csv).fillna("")
     if len(df_designs) == 0:
-        print(f"_run_af3_validation: {path_design_csv} has no passing designs, skipping validation.")
+        print(f"_run_validation: {path_design_csv} has no passing designs, skipping validation.")
         return
 
     path_run_dir = os.path.join(args.path_output_dir, args.design_name)  # same as refiner.get_run_dir(args)
     path_validation_dir = os.path.join(path_run_dir, f"validation_{args.run_validation}")
-    use_af3_weights = args.run_validation == "native_af3"
+    # Same GPU as the refinement loop when called from it; run_validation_only fills it in from run_config.yaml.
+    execute_validation(
+        vc.load_designs(path_design_csv), [args.run_validation], [getattr(args, "validation_seed", 0)], num_samples=5,
+        output_dir=os.path.relpath(path_validation_dir, OUTPUTS_MOUNT),
+        epitope_residues=getattr(args, "epitope_residues", ""), paratope_residues=getattr(args, "paratope_residues", ""),
+        gpu_type=getattr(args, "gpu_type", GPU_TYPE))
 
-    # Positional, in run_alphafold3's own declared order — .starmap() unpacks each tuple as *args,
-    # so use_af3_weights/path_output_dir are repeated per row (fixed across the batch) rather than
-    # passed once via kwargs=, since kwargs= can't fill use_af3_weights (the first, no-default
-    # positional param) while leaving the varying params to come from the tuple. msa_options left
-    # as "" — run_alphafold3 derives "empty" for the binder + a real MSA search for the target
-    # chain(s) internally, matching the "empty," convention used elsewhere in this pipeline.
-    rows = [
-        (use_af3_weights, row.seq_binder, row.seq_target, row.ligands, "", row.design_name, path_validation_dir)
-        for row in df_designs.itertuples()
-    ]
-    # validation_seed is separate from args.seed (the seed the *generating* model used, e.g. for an AF3/OpenFold3
-    # refiner run) — the receptor's own predicted conformation is seed-sensitive, so this controls that
-    # independently of whatever seed produced the designs being validated. Fixed across the whole batch, so
-    # passed via starmap's kwargs= rather than repeated in every row tuple.
-    # Same GPU as the refinement loop when called from it; run_validation_only's args has no gpu_type, so
-    # standalone re-validation uses the default.
-    af3_results = run_alphafold3.with_options(gpu=getattr(args, "gpu_type", GPU_TYPE)).starmap(
-        rows, kwargs={"seed": getattr(args, "validation_seed", 0)}
-    )
-    best_rows = [max(samples, key=lambda d: d["iptm"]) for samples in af3_results]
-    df_af3 = pd.DataFrame(best_rows).add_prefix("af3_")
-
-    # Safe to concat by position (not a key-based join): both frames are already row-aligned, since
-    # .starmap()'s order_outputs=True (the default) preserves rows' input order.
-    df_validated = pd.concat([df_designs.reset_index(drop=True), df_af3], axis=1)
+    n_failed = len(pd.read_csv(os.path.join(path_validation_dir, "failures.csv")))
+    if n_failed:
+        print(f"WARNING: {n_failed} of {len(df_designs)} validation job(s) failed; see {path_validation_dir}/failures.csv")
+    path_results = os.path.join(path_validation_dir, "validation_results.csv")
+    if not os.path.exists(path_results):
+        print("No validation job succeeded, so no validated CSV was written.")
+        return
+    df_results = pd.read_csv(path_results).add_prefix("val_")
+    df_validated = df_designs.merge(df_results, how="left", left_on="design_name", right_on="val_design_name")
     path_validated_csv = os.path.join(path_run_dir, f"top_designs_validated_{args.run_validation}.csv")
     df_validated.to_csv(path_validated_csv, index=False)
-    print(f"Saved {len(df_validated)} AF3-validated design(s) ({args.run_validation}) to {path_validated_csv}")
+    print(f"Saved {len(df_results)} validated design(s) ({args.run_validation}) to {path_validated_csv}")
 
 
 # No GPU/heavy image needed — this function only reads an existing top_designs.csv and dispatches
@@ -312,8 +289,8 @@ def _run_af3_validation(args, path_design_csv: str) -> None:
 # start (same reason it is listed on every other image in modal_common.py).
 _validation_trigger_image = (
     modal.Image.debian_slim(python_version="3.12")
-    .pip_install("pandas")
-    .add_local_python_source("modal_common")
+    .pip_install("pandas", "numpy", "pyyaml", "biotite", "gemmi")  # validation_core imports StrucTools
+    .add_local_python_source("modal_common", "validation_core", "StrucTools")
 )
 
 
@@ -334,8 +311,17 @@ def run_validation_only(design_name: str, run_validation: str, filename_output: 
     path_parent = os.path.join(OUTPUTS_MOUNT, _resolve_output_subdir(path_output_dir))
     args = SimpleNamespace(path_output_dir=path_parent, design_name=design_name, run_validation=run_validation,
                            validation_seed=validation_seed)
+    # The run's own settings (desired contact residues, GPU) come from its run_config.yaml when it has one.
+    path_config = os.path.join(path_parent, design_name, "run_config.yaml")
+    if os.path.exists(path_config):
+        import yaml
+        with open(path_config, encoding="utf-8") as f:
+            config = yaml.safe_load(f)
+        for key in ("epitope_residues", "paratope_residues", "gpu_type"):
+            if config.get(key):
+                setattr(args, key, config[key])
     path_design_csv = os.path.join(path_parent, design_name, filename_output)
-    _run_af3_validation(args=args, path_design_csv=path_design_csv)
+    _run_validation(args=args, path_design_csv=path_design_csv)
     outputs_volume.commit()
 
 

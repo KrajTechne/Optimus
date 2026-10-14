@@ -20,8 +20,8 @@ class FakeCall:
 
 
 def samples(iptm):
-    return [{"iptm": iptm - 0.1, "paratope_indices_B": "9"}, {"iptm": iptm, "paratope_indices_B": "1,2", "epitope_indices_B": "5,6"},
-            {"iptm": 0.1, "chain_ids": ["A", "B"]}]
+    return [{"iptm": iptm - 0.1, "paratope_indices_B": "9"}, {"iptm": iptm, "paratope_indices_B": "1,2", "epitope_indices_B": "5,6", "chain_ids": ["A", "B"]},
+            {"iptm": 0.1}]
 
 
 @pytest.fixture
@@ -46,8 +46,8 @@ def test_results_summary_and_failures_are_written(run):
 
     out = run(spawn)
     tall = pd.read_csv(out / "validation_results.csv")
-    assert len(tall) == 3 and set(tall.iptm) == {0.8}                    # best sample by iptm; list-valued metrics dropped
-    assert "chain_ids" not in tall and tall.contact_check_passed.all()
+    assert len(tall) == 3 and set(tall.iptm) == {0.8}                    # best sample by iptm
+    assert "chain_ids" in tall and tall.contact_check_passed.all()   # short list-valued metrics are kept
     assert tall.path_job.str.contains("of3_seed").all() and (tall.paratope_recall == 1).all()
     failures = pd.read_csv(out / "failures.csv")
     assert failures.design_name.tolist() == ["bad"] and "out of memory" in failures.error[0]
