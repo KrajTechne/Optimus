@@ -253,6 +253,10 @@ class RunESMFold2(StructurePredictionInputs):
         else:
             # 1. Update complex-specific metrics
             metrics.update({"iptm" : predicted_structure.iptm, "complex_plddt" : predicted_structure.plddt.mean().item(), "ptm" : predicted_structure.ptm})
+            # pLDDT is per token (residue, or one token per ligand atom); complex.chain_id is the integer index of each
+            # token's chain in input order, so 0 = the binder. complex_plddt above is the mean over every token.
+            binder_tokens = np.asarray(predicted_structure.complex.chain_id) == 0
+            metrics["binder_plddt"] = float(np.asarray(predicted_structure.plddt.cpu())[binder_tokens].mean())
 
             # 2. Compute binding interface contacts and ipSAE for each target chain
             metrics_holo = self.analyze_structure_holo(path_structure = path_predicted_structure, path_pae = path_predicted_structure_pae)

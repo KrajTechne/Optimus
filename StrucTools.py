@@ -338,6 +338,48 @@ def determine_binding_interface(pdb_file_path: str, hotspots: list, binder_chain
     }
     return contact_information
 
+
+def interface_positions(atoms, binder_chain: str, target_chain: str, cutoff: float = 4.5) -> tuple[list, list]:
+    """
+    Paratope and epitope as 1-indexed sequence positions (rank of the residue among that chain's amino acids,
+    the numbering a structure predictor sees when re-predicting the extracted sequence), not file residue IDs.
+    Same contact definition as determine_binding_interface(): heavy atoms within `cutoff` of each other.
+    """
+    def chain_atoms(chain):
+        chain_array = atoms[(atoms.chain_id == chain) & struc.filter_amino_acids(atoms) & (atoms.element != "H")]
+        return chain_array, struc.get_residue_positions(chain_array, np.arange(chain_array.array_length()))
+
+    binder, binder_pos = chain_atoms(binder_chain)
+    target, target_pos = chain_atoms(target_chain)
+    contacts = struc.CellList(target, cell_size=cutoff).get_atoms(binder.coord, radius=cutoff, as_mask=True)
+    paratope = np.unique(binder_pos[contacts.any(axis=1)]) + 1
+    epitope = np.unique(target_pos[contacts.any(axis=0)]) + 1
+    return paratope.tolist(), epitope.tolist()
+
+
+def binder_binds_contacts(metrics: dict, target_chain: str, epitope_residues: str = "", paratope_residues: str = "") -> bool:
+    """
+    Pass/fail contact rule for one target chain, read from the indices determine_binding_interface() stored in
+    `metrics`: at least 2 of the desired epitope residues on this chain (e.g. "B73,B74") must be in the actual
+    epitope, and at least 2 of the desired paratope residues (e.g. "A10,A11") in the actual paratope.
+    A side with no desired residues is not checked.
+    """
+    desired_paratope = {int(x[1:]) for x in paratope_residues.split(",") if x.strip()}
+    desired_epitope = {int(x[1:]) for x in epitope_residues.split(",") if x.strip() and x[0] == target_chain}
+    actual_paratope = {int(x) for x in metrics[f"paratope_indices_{target_chain}"].split(",") if x.strip()}
+    actual_epitope = {int(x) for x in metrics[f"epitope_indices_{target_chain}"].split(",") if x.strip()}
+
+    paratope_ok = len(desired_paratope & actual_paratope) >= 2 if desired_paratope else True
+    epitope_ok = len(desired_epitope & actual_epitope) >= 2 if desired_epitope else True
+    return paratope_ok and epitope_ok
+
+
+def binder_binds_all_targets(metrics: dict, num_targets: int, epitope_residues: str = "", paratope_residues: str = "") -> bool:
+    """binder_binds_contacts() passes for every target chain (B, C, ... in order)."""
+    return all(binder_binds_contacts(metrics, chr(ord("B") + i), epitope_residues, paratope_residues)
+               for i in range(num_targets))
+
+
 #---- Superimpose & Calculate RMSD ----------------------------------------------------------------------------------------------
 def superimpose_and_calculate_specified_rmsd(atom_array_fixed: struc.AtomArray, 
                                              atom_array_mobile: struc.AtomArray,

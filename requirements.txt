@@ -1,0 +1,13 @@
+# Local environment (Python 3.12): Modal client, structure and ligand tooling, validation core, tests.
+# The Modal images pin their own dependencies in modal_common.py; this file is only for your machine.
+modal==1.5.5
+biotite==1.7.1
+gemmi==0.7.5
+rdkit==2026.9.1
+pandas==3.0.5
+numpy==2.5.2
+PyYAML==6.0.3
+pydantic==2.13.5
+requests==2.34.2
+tqdm==4.70.1
+pytest==9.1.1

@@ -9,7 +9,7 @@ matplotlib.use("Agg")  # headless (no display) in a Modal container — must be 
 import matplotlib.pyplot as plt
 
 from LigandMPNN.wrapper import LigandMPNNWrapper
-from StrucTools import convert_cif_to_pdb
+from StrucTools import convert_cif_to_pdb, binder_binds_all_targets
 
 _PLOT_METRICS = {'plddt': {'ymin' : 0.0, "ymax": 1.0, 'color' : "#FF7F11"},
                  'ptm': {'ymin' : 0.0,  'ymax': 1.0, 'color' : "#E94560"},
@@ -129,29 +129,6 @@ def design_sequence(designer,model_type,pdb_file,chains_to_design="A",omit_AA="C
 
     return seq[0], logits
 
-def binder_binds_contacts(metrics, target_chain, epitope_residues, paratope_residues: str = ""):
-    """
-    Returns True if at least 2 contact residues on target_chain are contacted by the binder, using the
-    paratope/epitope indices that model.analyze_structure() already computed (via analyze_structure_holo)
-    for this target_chain — no separate structural analysis call needed here.
-    """
-    paratope_indices = [int(x[1:]) for x in paratope_residues.split(",") if x.strip()]
-    epitope_indices = [int(x[1:]) for x in epitope_residues.split(",") if x.strip() and x[0] == target_chain]
-
-    actual_paratope_indices = [int(x) for x in metrics[f'paratope_indices_{target_chain}'].split(",") if x.strip()]
-    actual_epitope_indices = [int(x) for x in metrics[f'epitope_indices_{target_chain}'].split(",") if x.strip()]
-
-    # Both paratope and epitope residues are optional constraints — if none apply to this call (either
-    # not specified at all, or epitope_indices filtered down to empty because none of the specified
-    # epitope_residues belong to this particular target_chain), don't gate on that side at all rather
-    # than forcing a failure. Only require >=2 common residues on a side that actually has constraints.
-    num_common_paratope_residues = len(set(paratope_indices).intersection(actual_paratope_indices))
-    num_common_epitope_residues = len(set(epitope_indices).intersection(actual_epitope_indices))
-    paratope_ok = (num_common_paratope_residues >= 2) if paratope_indices else True
-    epitope_ok = (num_common_epitope_residues >= 2) if epitope_indices else True
-
-    return paratope_ok and epitope_ok
-
 
 def _normalize_plddt_key(metrics: dict) -> dict:
     """
@@ -192,7 +169,7 @@ def run_refine_cycle(model, seq_designer, args, design_count):
 
     """
     # Setup: Create overarching design_cycles folder and improved_insilico folder
-    target_chains = ",".join(chr(ord('B') + i) for i in range(len(model.seq_list) - 1))
+    num_targets = len(model.seq_list) - 1
     path_run_dir = get_run_dir(args)
     path_overarching_design_cycle_folder = os.path.join(path_run_dir, "runs")
     path_improved_designs_folder = os.path.join(path_run_dir, "improved_insilico")
@@ -216,12 +193,7 @@ def run_refine_cycle(model, seq_designer, args, design_count):
     metrics_cycle_0 = _normalize_plddt_key(model.analyze_structure(predicted_structure, path_structure = path_structure_cycle_0))
     path_pdb_cycle_0 = convert_cif_to_pdb(path_structure_cycle_0)
 
-    contact_check_res_cycle_0 = [
-        binder_binds_contacts(metrics = metrics_cycle_0, target_chain = target_chain,
-                               epitope_residues = args.epitope_residues, paratope_residues = args.paratope_residues)
-        for target_chain in target_chains.split(",")
-    ]
-    contact_check_passed_cycle_0 = all(contact_check_res_cycle_0)
+    contact_check_passed_cycle_0 = binder_binds_all_targets(metrics_cycle_0, num_targets, args.epitope_residues, args.paratope_residues)
     print(f"Cycle 0: {args.filter_metric}={metrics_cycle_0[args.filter_metric]:.4f}, contact_check_passed={contact_check_passed_cycle_0}")
     if not contact_check_passed_cycle_0:
         print("Cycle 0: initial design did not pass the contact check — continuing anyway, MPNN redesign may fix it.")
@@ -256,12 +228,7 @@ def run_refine_cycle(model, seq_designer, args, design_count):
         path_pdb_cycle = convert_cif_to_pdb(path_structure_cycle)
 
         # 4. Contact check for this cycle's structure, using analyze_structure()'s own metrics
-        contact_check_res = [
-            binder_binds_contacts(metrics = metrics, target_chain = target_chain,
-                                   epitope_residues = args.epitope_residues, paratope_residues = args.paratope_residues)
-            for target_chain in target_chains.split(",")
-        ]
-        contact_check_passed = all(contact_check_res)
+        contact_check_passed = binder_binds_all_targets(metrics, num_targets, args.epitope_residues, args.paratope_residues)
         cycle_history.append({"run_id": design_count, "cycle": cycle, "contact_check_passed": contact_check_passed, **metrics,
                               "seq_binder" : new_binder_seq, "seed_mpnn": seed_mpnn})
         print(f"Cycle {cycle}: {args.filter_metric}={metrics[args.filter_metric]:.4f}, contact_check_passed={contact_check_passed}")

@@ -6,6 +6,9 @@ call directly. Both of those files import from here rather than from each other,
 invocation through either entrypoint script only ever needs this module (plus its own file)
 mountable in a container — not the other entrypoint script.
 """
+import os
+import posixpath
+
 import modal
 
 app = modal.App("structure-prediction")
@@ -102,7 +105,7 @@ refiner_esmfold2_boltz2_image = (
     # add_local_python_source call disables Modal's implicit automount for that image — so whichever
     # script is passed to `modal run` needs modal_common itself declared here too, since both
     # entrypoint scripts import it at module level.
-    .add_local_python_source(*_SHARED_LOCAL_MODULES, "RunESMFold2", "RunBoltz2", "mmseqs2", "refiner", "modal_common")
+    .add_local_python_source(*_SHARED_LOCAL_MODULES, "RunESMFold2", "RunBoltz2", "mmseqs2", "refiner", "modal_common", "validation_core")
 )
 
 # Incompatabile torch dependencies between OpenDDE and ESMFold2: Specifically in pytorch version specs
@@ -124,7 +127,7 @@ refiner_opendde_image = (
     # only needs RunOpenDDE mountable, not RunESMFold2/RunBoltz2 — the OpenDDE branch is the
     # only one that will ever actually execute here.
     # modal_common listed explicitly for the same reason as refiner_esmfold2_boltz2_image above.
-    .add_local_python_source(*_SHARED_LOCAL_MODULES, "RunOpenDDE", "mmseqs2", "refiner", "modal_common")
+    .add_local_python_source(*_SHARED_LOCAL_MODULES, "RunOpenDDE", "mmseqs2", "refiner", "modal_common", "validation_core")
 )
 
 
@@ -199,7 +202,7 @@ refiner_alphafold3_image = (
     .pip_install("ProDy", "dm-tree", "ml-collections", "biopython", "matplotlib", "pyyaml")
     .add_local_dir("LigandMPNN", "/root/LigandMPNN", copy=True, ignore=["model_params", "*.pt"])
     .run_commands("bash /root/LigandMPNN/get_model_params.sh /root/LigandMPNN/model_params")
-    .add_local_python_source(*_SHARED_LOCAL_MODULES, "RunAlphaFold3", "refiner", "modal_common")
+    .add_local_python_source(*_SHARED_LOCAL_MODULES, "RunAlphaFold3", "refiner", "modal_common", "validation_core")
 )
 
 
@@ -222,7 +225,7 @@ def run_alphafold3(
     seed: int = 0,
 ) -> list[dict]:
     """
-    Shared by modal_run_refiner.py's own AF3/OpenFold3 validation step (_run_af3_validation) and
+    Shared by modal_run_refiner.py's own AF3/OpenFold3 validation step (_run_validation) and
     modal_run_structure_prediction.py's predict() dispatch — defined here (rather than in either of
     those two files) so neither one has to import the other just to reuse this one function.
     """
@@ -268,3 +271,163 @@ def run_alphafold3(
     df_metrics = design.predict_analyze()
     outputs_volume.commit()
     return df_metrics.to_dict(orient="records")
+
+
+@app.function(
+    image=refiner_esmfold2_boltz2_image,
+    gpu=GPU_TYPE,
+    volumes={OUTPUTS_MOUNT: outputs_volume},
+    timeout=TIMEOUT_SECONDS,
+)
+def run_esmfold2(
+    seq_binder: str,
+    seq_target: str,
+    ligands: str = "",
+    msa_options: str = "",
+    design_name: str = "",
+    path_output_dir: str = "",
+    num_samples: int = 5,
+    seed: int = 0,
+) -> list[dict]:
+    """
+    ESMFold2 counterpart of run_alphafold3 for the validation entrypoint: one design, one seed, num_samples
+    diffusion samples; returns one metrics dict per sample. Everything is written directly into path_output_dir
+    (the job's own folder): sample<N>.cif, sample<N>_pae.npz, msa/, input.yaml, all_models_metrics.csv.
+
+    Not predict_esm_boltz: that writes to a fixed /outputs/<design_name> and has no output-dir parameter. The MSA
+    folder lives inside path_output_dir because ESMFold2 caches MSAs by chain letter, not by sequence; a folder
+    shared between jobs could silently reuse another design's target MSA (reuse_msa=False for the same reason on
+    reruns into an existing folder).
+    """
+    import pandas as pd
+    import yaml
+    from RunESMFold2 import RunESMFold2
+
+    num_chains = 1 + len(seq_target.split(","))
+    # Same default as run_alphafold3: binder unsearched, every target chain searched.
+    if msa_options == "":
+        msa_options = ",".join(["empty"] + [""] * (num_chains - 1))
+    design = RunESMFold2(
+        design_name=design_name,
+        seq_list=[seq_binder] + seq_target.split(","),
+        msa_options=msa_options.split(","),
+        entity_types=["protein"] * num_chains,
+        ligand_list=ligands.split(",") if ligands else [],
+        num_samples=num_samples,
+        seed=seed,
+        path_output_dir=path_output_dir,
+        reuse_msa=False,
+    )
+    predictions, input_yaml = design.predict_structure()
+    if num_samples == 1:
+        predictions = [predictions]  # a single sample comes back unwrapped
+    with open(os.path.join(path_output_dir, "input.yaml"), "w") as f:
+        yaml.dump(input_yaml, f)
+    metrics = [design.analyze_structure(prediction, model_id=i, path_structure=os.path.join(path_output_dir, f"sample{i}.cif"))
+               for i, prediction in enumerate(predictions)]
+    df_metrics = pd.DataFrame(metrics)
+    df_metrics.to_csv(os.path.join(path_output_dir, "all_models_metrics.csv"), index=False)
+    outputs_volume.commit()
+    return df_metrics.to_dict(orient="records")
+
+
+def resolve_output_subdir(path_output_dir) -> str:
+    """
+    path_output_dir on Modal is a folder inside the outputs volume that groups runs: each run writes to
+    {OUTPUTS_MOUNT}/{path_output_dir}/{design_name}/. Blank (default) means the volume root. Absolute paths and
+    ".." are rejected, since anything outside the mounted volume would not persist after the run.
+    Returns the normalized volume-relative folder ("" for the root).
+    """
+    raw = (path_output_dir or "").strip().replace("\\", "/")
+    parts = raw.split("/")
+    if raw.startswith("/") or ":" in parts[0] or ".." in parts:
+        raise ValueError(f"path_output_dir must be a folder inside the outputs volume (e.g. 'my_sweep'), "
+                         f"not an absolute path or one containing '..': {path_output_dir!r}")
+    subdir = posixpath.normpath(raw) if raw else ""
+    return "" if subdir == "." else subdir
+
+
+# ---------------------------------------------------------------------------
+# Validation of arbitrary designs: design x model x seed jobs, collected into one results folder
+# ---------------------------------------------------------------------------
+SUPPORTED_VALIDATION_MODELS = ("of3", "native_af3", "esmfold2")
+
+
+def _spawn_validation_job(job: dict, path_job: str, gpu_type: str):
+    """Start one validation job on its model's own function/image; returns the FunctionCall."""
+    if job["model"] in ("of3", "native_af3"):
+        # AlphaFold3 writes {path_output_dir}/{design_name}/seed-N_sample-k/, so the job's own folder name
+        # (e.g. of3_seed1) is passed as its run name and the design's folder as its parent: <out>/<design>/of3_seed1/.
+        path_design, label = os.path.split(path_job)
+        return run_alphafold3.with_options(gpu=gpu_type).spawn(
+            use_af3_weights=(job["model"] == "native_af3"), seq_binder=job["seq_binder"], seq_target=job["seq_target"],
+            ligands=job["ligands"], design_name=label, path_output_dir=path_design,
+            num_samples=job["num_samples"], seed=job["seed"])
+    if job["model"] == "esmfold2":
+        return run_esmfold2.with_options(gpu=gpu_type).spawn(
+            seq_binder=job["seq_binder"], seq_target=job["seq_target"], ligands=job["ligands"],
+            design_name=job["design_name"], path_output_dir=path_job, num_samples=job["num_samples"], seed=job["seed"])
+    raise ValueError(f"model {job['model']!r} is not supported yet; supported: {SUPPORTED_VALIDATION_MODELS}")
+
+
+def execute_validation(designs, models, seeds, num_samples: int, output_dir: str, epitope_residues: str = "",
+                       paratope_residues: str = "", max_jobs: int = 200, gpu_type: str = GPU_TYPE,
+                       flush_every: int = 10, poll_seconds: int = 15) -> None:
+    """
+    Runs every design x model x seed job in parallel and writes the results folder under
+    {OUTPUTS_MOUNT}/{output_dir}: validation_results.csv (one row per finished job), validation_summary.csv,
+    failures.csv. Jobs are spawned (not mapped) so each result is matched to its job and a failed job lands in
+    failures.csv instead of ending the batch; files are rewritten every `flush_every` finished jobs, so a driver
+    timeout keeps the partial results. Meant to run inside a container (the driver function); `designs` is a
+    validation_core.load_designs() frame.
+    """
+    import time
+    import pandas as pd
+    import validation_core as vc
+
+    jobs = vc.expand_jobs(designs, models, seeds, num_samples=num_samples, max_jobs=max_jobs)
+    out_dir = os.path.join(OUTPUTS_MOUNT, output_dir)
+    pending = {}
+    for job in jobs:
+        folder = vc.job_folder(job["design_name"], job["model"], job["seed"])
+        pending[len(pending)] = (job, folder, _spawn_validation_job(job, os.path.join(out_dir, folder), gpu_type))
+    print(f"Spawned {len(pending)} validation jobs; writing results to {out_dir}")
+
+    rows, failures = [], []
+
+    def flush():
+        os.makedirs(out_dir, exist_ok=True)
+        pd.DataFrame(failures, columns=["design_name", "model", "seed", "error"]).to_csv(
+            os.path.join(out_dir, "failures.csv"), index=False)
+        if rows:
+            tall = vc.add_contact_check(pd.DataFrame(rows), designs, epitope_residues, paratope_residues)
+            tall = vc.add_interface_consistency(tall, designs)
+            tall.to_csv(os.path.join(out_dir, "validation_results.csv"), index=False)
+            vc.summarize(tall, designs).to_csv(os.path.join(out_dir, "validation_summary.csv"), index=False)
+        outputs_volume.commit()
+
+    finished_since_flush = 0
+    while pending:
+        for key, (job, folder, call) in list(pending.items()):
+            try:
+                samples = call.get(timeout=0)
+            except TimeoutError:
+                continue                      # not finished yet
+            except Exception as exc:          # the job itself failed; keep the rest going
+                failures.append({"design_name": job["design_name"], "model": job["model"], "seed": job["seed"],
+                                 "error": f"{type(exc).__name__}: {exc}"[:500]})
+                print(f"FAILED {folder}: {exc}")
+            else:
+                best = max(samples, key=lambda sample: sample["iptm"])  # best sample by iptm, as in the refiner
+                # Every metric is kept, including AF3's short per-chain lists; its large per-atom arrays are already
+                # dropped by RunAlphaFold3.analyze_structure.
+                rows.append({**best, **{k: job[k] for k in ("design_name", "model", "seed", "num_samples")},
+                             "design_id": folder.replace("/", "_"), "path_job": os.path.join(output_dir, folder)})
+            del pending[key]
+            finished_since_flush += 1
+        if finished_since_flush >= flush_every or not pending:
+            flush()
+            finished_since_flush = 0
+            print(f"{len(rows)} done, {len(failures)} failed, {len(pending)} running")
+        if pending:
+            time.sleep(poll_seconds)

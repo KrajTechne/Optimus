@@ -1,0 +1,20 @@
+# Example --config file for `modal run --detach modal_run_validation.py --config configs/example_validation.yaml`
+# Keys match the entrypoint's own flag names (with underscores, not dashes). When --config is given, every other
+# CLI flag is ignored. input and output_dir are required; everything else falls back to the entrypoint's defaults.
+
+# Designs CSV, read on your machine (relative paths are relative to where you run the command). Required columns:
+# design_name, seq_binder, seq_target. Build one from a folder of structures with designs_from_structures.py.
+input: configs/example_designs.csv
+# Folder inside the Modal outputs volume that receives the results (not the volume root).
+output_dir: example_validation
+# Any of: of3, native_af3, esmfold2. A list or a comma-separated string both work.
+models: [of3, esmfold2]
+seeds: [1, 2, 3]
+# Diffusion samples per job; the best by iptm is kept as that seed's result.
+num_samples: 5
+# Desired contact residues for contact_check_passed (e.g. "B73,B74" / "A10,A11"); blank = always passes.
+epitope_residues: ""
+paratope_residues: ""
+# Refuses to start if designs x models x seeds exceeds this.
+max_jobs: 200
+gpu_type: H100
