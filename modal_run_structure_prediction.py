@@ -20,7 +20,7 @@ from modal_common import (
     OPENDDE_CACHE_MOUNT, opendde_cache_volume,
     GPU_TYPE, TIMEOUT_SECONDS,
     refiner_esmfold2_boltz2_image, refiner_opendde_image,
-    run_alphafold3, load_config,
+    run_alphafold3, load_config, OUTPUTS_VOLUME_NAME,
 )
 
 
@@ -172,4 +172,5 @@ def predict(config: str = "", model_name: str = "", seq_binder: str = "", seq_ta
             f"'OpenFold3' — got {kwargs['model_name']!r}"
         )
     print(result)
+    print(f"Outputs are on volume `{OUTPUTS_VOLUME_NAME}` under {kwargs['design_name']}/.")
 
