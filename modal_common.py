@@ -43,7 +43,12 @@ _SHARED_LOCAL_MODULES = ["StructurePredictionInputs", "StrucTools"]
 
 # Persists predicted structures/metrics past the container's lifetime so
 # they can be pulled down afterward with `modal volume get`.
-outputs_volume = modal.Volume.from_name("structure-prediction-outputs", create_if_missing=True)
+# The name can be overridden per invocation with the OPTIMUS_OUTPUTS_VOLUME environment variable (set it in the
+# shell that runs `modal run`). It has to be an environment variable: the volume is attached when this module is
+# imported, before any flag or --config value is read. Containers import this module without the variable, but
+# Modal binds their `outputs_volume` to the volume the client mounted, so only the client's value matters.
+OUTPUTS_VOLUME_NAME = os.environ.get("OPTIMUS_OUTPUTS_VOLUME", "structure-prediction-outputs")
+outputs_volume = modal.Volume.from_name(OUTPUTS_VOLUME_NAME, create_if_missing=True)
 OUTPUTS_MOUNT = "/outputs"
 
 # Persists Boltz's CCD data + model weights cache (/root/.boltz, its default

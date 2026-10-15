@@ -19,7 +19,7 @@ import yaml
 import validation_core as vc
 from modal_common import (
     app, load_config, GPU_TYPE, TIMEOUT_SECONDS, OUTPUTS_MOUNT, outputs_volume,
-    SUPPORTED_VALIDATION_MODELS, execute_validation, resolve_output_subdir,
+    OUTPUTS_VOLUME_NAME, SUPPORTED_VALIDATION_MODELS, execute_validation, resolve_output_subdir,
 )
 
 # CPU-only: the driver just spawns the model jobs (each on its own GPU image) and aggregates their results.
@@ -91,10 +91,11 @@ def validate_designs(config: str = "", input: str = "", models: str = DEFAULTS["
 
     with open(settings["input"], encoding="utf-8") as f:
         designs_csv = f.read()
-    recorded = {**settings, "models": models, "seeds": seeds, "output_dir": output_dir}  # usable as a --config file
+    # Usable as a --config file (outputs_volume is only a record: the volume comes from OPTIMUS_OUTPUTS_VOLUME).
+    recorded = {**settings, "models": models, "seeds": seeds, "output_dir": output_dir, "outputs_volume": OUTPUTS_VOLUME_NAME}
     # .spawn() so the local process can exit right away without stopping the run (see refiner()).
     call = run_validation.spawn(
         designs_csv, models, seeds, settings["num_samples"], output_dir, settings["epitope_residues"],
         settings["paratope_residues"], settings["max_jobs"], settings["gpu_type"], recorded)
     print(f"Spawned {len(jobs)} validation jobs ({len(designs)} designs x {len(models)} models x {len(seeds)} seeds) "
-          f"as function call {call.object_id}; results go to {output_dir}/ on the outputs volume.")
+          f"as function call {call.object_id}; results go to {output_dir}/ on the outputs volume `{OUTPUTS_VOLUME_NAME}`.")

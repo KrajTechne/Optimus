@@ -80,6 +80,16 @@ pip install -r requirements.txt     # includes pytest; run the tests with: pytes
 modal setup                         # one-time Modal login
 ```
 
+Results are written to the Modal volume `structure-prediction-outputs`, created in your workspace on first use. To use a different volume name (for example one volume per project), set `OPTIMUS_OUTPUTS_VOLUME` in the shell that runs `modal run`; it has to be an environment variable because the volume is attached before any flag or config file is read:
+
+```
+export OPTIMUS_OUTPUTS_VOLUME=my_project_outputs        # PowerShell: $env:OPTIMUS_OUTPUTS_VOLUME = "my_project_outputs"
+modal run modal_run_refiner.py::refiner ...
+modal volume get my_project_outputs <folder> <local path>
+```
+
+Set it on every run and every `modal volume` command for that project: a run launched without it goes to the default volume. Each entrypoint prints the volume it used when it starts a run. Only the outputs volume is configurable; the Boltz2/OpenDDE weights caches keep their fixed names.
+
 ## Usage
 
 ### Locally

@@ -30,7 +30,7 @@ from modal_common import (
     BOLTZ_CACHE_MOUNT, boltz_cache_volume,
     OPENDDE_CACHE_MOUNT, opendde_cache_volume,
     refiner_esmfold2_boltz2_image, refiner_opendde_image, refiner_alphafold3_image,
-    run_alphafold3, execute_validation, resolve_output_subdir as _resolve_output_subdir,
+    OUTPUTS_VOLUME_NAME, run_alphafold3, execute_validation, resolve_output_subdir as _resolve_output_subdir,
 )
 
 
@@ -234,7 +234,8 @@ def refiner(config: str = "", model_name: str = "", seq_binder: str = "", seq_ta
     call = run_fn.with_options(gpu=gpu_type).spawn(**kwargs)
     subdir = kwargs.get("path_output_dir") or "(volume root)"
     print(f"Spawned {kwargs['design_name']} as function call {call.object_id} — runs independently of this "
-          f"terminal now. Check progress via `modal app list` or the outputs volume under {subdir}/{kwargs['design_name']}/.")
+          f"terminal now. Check progress via `modal app list` or the outputs volume `{OUTPUTS_VOLUME_NAME}` under "
+          f"{subdir}/{kwargs['design_name']}/.")
 
 
 def _run_validation(args, path_design_csv: str) -> None:
@@ -341,4 +342,4 @@ def validate(config: str = "", design_name: str = "", run_validation: str = "of3
     # .spawn(), same reasoning as refiner()'s own call.
     call = run_validation_only.spawn(**kwargs)
     print(f"Spawned validation for {kwargs['design_name']} as function call {call.object_id} — "
-          f"runs independently of this terminal now.")
+          f"runs independently of this terminal now. Outputs volume: `{OUTPUTS_VOLUME_NAME}`.")
