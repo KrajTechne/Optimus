@@ -36,3 +36,5 @@ validation_seed: 0
 # Validation step only (run_validation): at most this many validation jobs run at once, one GPU each, the rest wait.
 # Keep it at or below your Modal GPU limit; the refiner loop itself holds one more GPU while validation runs.
 validation_max_gpus: 5
+# Validation step only: extra attempts for a validation job that errors before it counts as failed (0 = never retry).
+validation_max_retries: 1

@@ -175,6 +175,7 @@ modal run --detach modal_run_validation.py --input designs.csv --models of3,esmf
 | `--epitope-residues` / `--paratope-residues` | `""` | Desired contact residues (`B73,B74` / `A10,A11`) for `contact_check_passed`; same two-residue rule as the refiner |
 | `--max-jobs` | 200 | Safety check on the total size: refuses to start if designs x models x seeds is larger |
 | `--max-gpus` | 5 | Jobs running at once (one GPU each); the rest wait their turn. Set it at or below your Modal GPU limit |
+| `--max-retries` | 1 | Extra attempts for a job that errors before it is recorded in `failures.csv` (0 = never retry). A job killed by the Modal function timeout is not retried |
 | `--gpu-type` | `H100` | |
 | `--config` | | YAML/JSON file replacing every other flag; see `configs/example_validation.yaml` |
 
@@ -187,7 +188,7 @@ the run is spawned, so it keeps going if your terminal closes. Rerunning with th
 |---|---|
 | `validation_results.csv` | One row per design x model x seed (best sample by iptm): the model's metrics, `contact_check_passed`, and the interface-consistency columns below |
 | `validation_summary.csv` | One row per design x model: `n_seeds`, mean/min/max of `iptm`, `ipsae_min`, `binder_plddt`, `complex_plddt`, `contact_pass_fraction`, mean consistency, and seed-to-seed overlap |
-| `failures.csv` | Jobs that errored (the rest carry on) |
+| `failures.csv` | Jobs that errored on every attempt, with the number of `attempts` (the rest carry on) |
 | `designs.csv`, `run_config.yaml` | Copy of the input and every setting used (`run_config.yaml` works as a `--config` file) |
 | `<design_name>/<model>_seed<N>/` | One folder per job: structures, PAE, MSAs, `all_models_metrics.csv` |
 
@@ -242,6 +243,7 @@ This mainly exists to avoid shell-quoting headaches with sequence strings and co
 | `--run_validation` | `""` | `""` (skip), `native_af3`, or `of3` — only takes effect via `modal_run_refiner.py`, not plain `python refiner.py` |
 | `--validation_seed` | 0 | Structure-model seed for the validation step only, separate from `--seed`. The receptor's own predicted conformation is seed-sensitive, so this is worth setting explicitly rather than relying on AF3's default (`modal_run_refiner.py::validate` also takes it, to re-validate an existing `top_designs.csv` without rerunning the refiner loop) |
 | `--validation_max_gpus` | 5 | Validation step only: most validation jobs (one GPU each) running at once; the rest wait their turn. Keep it at or below your Modal GPU limit, remembering the refiner loop holds one more GPU while validation runs. Also accepted by `modal_run_refiner.py::validate` |
+| `--validation_max_retries` | 1 | Validation step only: extra attempts for a validation job that errors before it is recorded as failed (0 = never retry). A timed-out job is not retried. Also accepted by `modal_run_refiner.py::validate` |
 
 ## Output
 

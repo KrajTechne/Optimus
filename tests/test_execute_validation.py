@@ -1,3 +1,4 @@
+import modal
 import pandas as pd
 import pytest
 
@@ -86,3 +87,67 @@ def test_no_more_than_max_gpus_jobs_run_at_once(run):
 def test_max_gpus_must_be_positive(run):
     with pytest.raises(ValueError, match="max_gpus"):
         run(lambda job, path_job, gpu_type: FakeCall(samples(0.8)), max_gpus=0)
+
+
+def flaky_spawn(fail_times, error=RuntimeError("container preempted")):
+    """Spawner whose jobs for design `bad` error `fail_times` times (per job) and then succeed."""
+    started = {}
+
+    def spawn(job, path_job, gpu_type):
+        n = started[path_job] = started.get(path_job, 0) + 1
+        return FakeCall(error if job["design_name"] == "bad" and n <= fail_times else samples(0.8))
+    spawn.started = started
+    return spawn
+
+
+def test_job_that_fails_once_is_retried_and_succeeds(run):
+    spawn = flaky_spawn(fail_times=1)
+    out = run(spawn)                                                    # default max_retries=1
+    assert len(pd.read_csv(out / "validation_results.csv")) == 4 and len(pd.read_csv(out / "failures.csv")) == 0
+    assert sorted(spawn.started.values()) == [1, 1, 2, 2]               # both "bad" jobs ran twice
+
+
+def test_job_that_keeps_failing_is_recorded_with_its_attempts(run):
+    out = run(flaky_spawn(fail_times=99))
+    failures = pd.read_csv(out / "failures.csv")
+    assert failures.design_name.tolist() == ["bad", "bad"] and failures.attempts.tolist() == [2, 2]
+    assert len(pd.read_csv(out / "validation_results.csv")) == 2
+
+
+def test_max_retries_zero_never_retries(run):
+    spawn = flaky_spawn(fail_times=1)
+    out = run(spawn, max_retries=0)
+    assert pd.read_csv(out / "failures.csv").attempts.tolist() == [1, 1] and max(spawn.started.values()) == 1
+
+
+def test_function_timeouts_are_not_retried(run):
+    spawn = flaky_spawn(fail_times=99, error=modal.exception.FunctionTimeoutError("timed out"))
+    out = run(spawn, max_retries=3)
+    assert pd.read_csv(out / "failures.csv").attempts.tolist() == [1, 1] and max(spawn.started.values()) == 1
+
+
+def test_retries_still_respect_max_gpus(run):
+    active, peak = set(), [0]
+    inner = flaky_spawn(fail_times=1)
+
+    class Tracked(FakeCall):
+        def get(self, timeout=0):
+            try:
+                return super().get(timeout)
+            finally:
+                active.discard(self)
+
+    def spawn(job, path_job, gpu_type):
+        base = inner(job, path_job, gpu_type)
+        call = Tracked(base.result, waits=1)
+        active.add(call)
+        peak[0] = max(peak[0], len(active))
+        return call
+
+    out = run(spawn, max_gpus=2)
+    assert peak[0] <= 2 and len(pd.read_csv(out / "validation_results.csv")) == 4
+
+
+def test_max_retries_must_not_be_negative(run):
+    with pytest.raises(ValueError, match="max_retries"):
+        run(lambda job, path_job, gpu_type: FakeCall(samples(0.8)), max_retries=-1)

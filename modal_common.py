@@ -36,6 +36,7 @@ def load_config(path: str) -> dict:
 # without redefining the function or rebuilding its image.
 GPU_TYPE = "H100"
 TIMEOUT_SECONDS = 5 * 60 * 60
+DEFAULT_MAX_RETRIES = 1   # extra attempts for a validation job that errors (0 = never retry)
 DEFAULT_MAX_GPUS = 5   # validation jobs running at once (one GPU each); keeps a batch under the workspace GPU limit
 
 # StructurePredictionInputs.py (base validation) and StrucTools.py (binding
@@ -378,13 +379,15 @@ def _spawn_validation_job(job: dict, path_job: str, gpu_type: str):
 
 def execute_validation(designs, models, seeds, num_samples: int, output_dir: str, epitope_residues: str = "",
                        paratope_residues: str = "", max_jobs: int = 200, gpu_type: str = GPU_TYPE,
-                       max_gpus: int = DEFAULT_MAX_GPUS, flush_every: int = 10, poll_seconds: int = 15) -> None:
+                       max_gpus: int = DEFAULT_MAX_GPUS, max_retries: int = DEFAULT_MAX_RETRIES, flush_every: int = 10,
+                       poll_seconds: int = 15) -> None:
     """
     Runs every design x model x seed job, at most `max_gpus` at a time (one GPU each, so this keeps a big batch
     under the workspace's GPU limit), and writes the results folder under
     {OUTPUTS_MOUNT}/{output_dir}: validation_results.csv (one row per finished job), validation_summary.csv,
-    failures.csv. Jobs are spawned (not mapped) so each result is matched to its job and a failed job lands in
-    failures.csv instead of ending the batch; files are rewritten every `flush_every` finished jobs, so a driver
+    failures.csv. Jobs are spawned (not mapped) so each result is matched to its job; a job that errors is tried
+    again up to `max_retries` more times (not after a Modal function timeout, which would only burn the full
+    timeout again), then lands in failures.csv instead of ending the batch; files are rewritten every `flush_every` finished jobs, so a driver
     timeout keeps the partial results. Meant to run inside a container (the driver function); `designs` is a
     validation_core.load_designs() frame.
     """
@@ -395,13 +398,17 @@ def execute_validation(designs, models, seeds, num_samples: int, output_dir: str
     jobs = vc.expand_jobs(designs, models, seeds, num_samples=num_samples, max_jobs=max_jobs)
     if max_gpus < 1:
         raise ValueError(f"max_gpus must be at least 1, got {max_gpus}")
+    if max_retries < 0:
+        raise ValueError(f"max_retries must be 0 or more, got {max_retries}")
     out_dir = os.path.join(OUTPUTS_MOUNT, output_dir)
     waiting = list(enumerate(jobs))   # not started yet, in order
     pending = {}                      # started, not finished
+    attempts = {}                     # job key -> attempts started so far
 
     def start_jobs():
         while waiting and len(pending) < max_gpus:
             key, job = waiting.pop(0)
+            attempts[key] = attempts.get(key, 0) + 1
             folder = vc.job_folder(job["design_name"], job["model"], job["seed"])
             pending[key] = (job, folder, _spawn_validation_job(job, os.path.join(out_dir, folder), gpu_type))
 
@@ -412,7 +419,7 @@ def execute_validation(designs, models, seeds, num_samples: int, output_dir: str
 
     def flush():
         os.makedirs(out_dir, exist_ok=True)
-        pd.DataFrame(failures, columns=["design_name", "model", "seed", "error"]).to_csv(
+        pd.DataFrame(failures, columns=["design_name", "model", "seed", "attempts", "error"]).to_csv(
             os.path.join(out_dir, "failures.csv"), index=False)
         if rows:
             tall = vc.add_contact_check(pd.DataFrame(rows), designs, epitope_residues, paratope_residues)
@@ -429,9 +436,14 @@ def execute_validation(designs, models, seeds, num_samples: int, output_dir: str
             except TimeoutError:
                 continue                      # not finished yet
             except Exception as exc:          # the job itself failed; keep the rest going
+                if attempts[key] <= max_retries and not isinstance(exc, modal.exception.FunctionTimeoutError):
+                    print(f"RETRY {folder} (attempt {attempts[key] + 1} of {max_retries + 1}): {exc}")
+                    waiting.insert(0, (key, job))     # back through start_jobs(), so max_gpus still applies
+                    del pending[key]
+                    continue
                 failures.append({"design_name": job["design_name"], "model": job["model"], "seed": job["seed"],
-                                 "error": f"{type(exc).__name__}: {exc}"[:500]})
-                print(f"FAILED {folder}: {exc}")
+                                 "attempts": attempts[key], "error": f"{type(exc).__name__}: {exc}"[:500]})
+                print(f"FAILED {folder} after {attempts[key]} attempt(s): {exc}")
             else:
                 best = max(samples, key=lambda sample: sample["iptm"])  # best sample by iptm, as in the refiner
                 # Every metric is kept, including AF3's short per-chain lists; its large per-atom arrays are already

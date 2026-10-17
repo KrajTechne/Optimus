@@ -19,4 +19,6 @@ paratope_residues: ""
 max_jobs: 200
 # Jobs running at once (one GPU each); keep at or below your Modal GPU limit.
 max_gpus: 5
+# Extra attempts for a job that errors before it is recorded in failures.csv (0 = never retry).
+max_retries: 1
 gpu_type: H100
