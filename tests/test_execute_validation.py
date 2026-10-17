@@ -31,9 +31,10 @@ def run(tmp_path, monkeypatch):
     designs = vc.load_designs(pd.DataFrame({"design_name": ["good", "bad"], "seq_binder": ["ACDE", "ACDF"], "seq_target": ["GGHH", "GGHH"],
                                             "ref_paratope_indices_B": ["1,2", "1,2"], "ref_epitope_indices_B": ["5,6", "5,6"]}))
 
-    def execute(spawn):
+    def execute(spawn, **kwargs):
         monkeypatch.setattr(modal_common, "_spawn_validation_job", spawn)
-        modal_common.execute_validation(designs, ["of3"], [1, 2], 3, "out", paratope_residues="A1,A2", poll_seconds=0, flush_every=2)
+        modal_common.execute_validation(designs, ["of3"], [1, 2], 3, "out", paratope_residues="A1,A2", poll_seconds=0,
+                                        flush_every=2, **kwargs)
         return tmp_path / "out"
     return execute
 
@@ -59,3 +60,29 @@ def test_job_folder_is_passed_to_the_runner(run, tmp_path):
     seen = []
     run(lambda job, path_job, gpu_type: seen.append(path_job) or FakeCall(samples(0.5)))
     assert sorted(p.replace("\\", "/") for p in seen)[0] == f"{tmp_path}/out/bad/of3_seed1".replace("\\", "/")
+
+
+def test_no_more_than_max_gpus_jobs_run_at_once(run):
+    active, peak, spawned = set(), [0], []
+
+    class Tracked(FakeCall):
+        def get(self, timeout=0):
+            result = super().get(timeout)    # raises TimeoutError while still "running"
+            active.discard(self)
+            return result
+
+    def spawn(job, path_job, gpu_type):
+        call = Tracked(samples(0.8), waits=2)
+        active.add(call)
+        spawned.append(call)
+        peak[0] = max(peak[0], len(active))
+        return call
+
+    out = run(spawn, max_gpus=2)
+    assert len(spawned) == 4 and peak[0] == 2                          # all four ran, never more than two together
+    assert len(pd.read_csv(out / "validation_results.csv")) == 4
+
+
+def test_max_gpus_must_be_positive(run):
+    with pytest.raises(ValueError, match="max_gpus"):
+        run(lambda job, path_job, gpu_type: FakeCall(samples(0.8)), max_gpus=0)

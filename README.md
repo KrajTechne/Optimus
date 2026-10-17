@@ -173,7 +173,8 @@ modal run --detach modal_run_validation.py --input designs.csv --models of3,esmf
 | `--seeds` | `0` | Comma-separated structure-model seeds |
 | `--num-samples` | 5 | Diffusion samples per job; the best by iptm is that seed's result |
 | `--epitope-residues` / `--paratope-residues` | `""` | Desired contact residues (`B73,B74` / `A10,A11`) for `contact_check_passed`; same two-residue rule as the refiner |
-| `--max-jobs` | 200 | Refuses to start if designs x models x seeds is larger |
+| `--max-jobs` | 200 | Safety check on the total size: refuses to start if designs x models x seeds is larger |
+| `--max-gpus` | 5 | Jobs running at once (one GPU each); the rest wait their turn. Set it at or below your Modal GPU limit |
 | `--gpu-type` | `H100` | |
 | `--config` | | YAML/JSON file replacing every other flag; see `configs/example_validation.yaml` |
 
@@ -240,6 +241,7 @@ This mainly exists to avoid shell-quoting headaches with sequence strings and co
 | `--threshold` | `0.8` (iptm) / `0.61` (ipsae_min) | Minimum `--filter_metric` value to pass |
 | `--run_validation` | `""` | `""` (skip), `native_af3`, or `of3` — only takes effect via `modal_run_refiner.py`, not plain `python refiner.py` |
 | `--validation_seed` | 0 | Structure-model seed for the validation step only, separate from `--seed`. The receptor's own predicted conformation is seed-sensitive, so this is worth setting explicitly rather than relying on AF3's default (`modal_run_refiner.py::validate` also takes it, to re-validate an existing `top_designs.csv` without rerunning the refiner loop) |
+| `--validation_max_gpus` | 5 | Validation step only: most validation jobs (one GPU each) running at once; the rest wait their turn. Keep it at or below your Modal GPU limit, remembering the refiner loop holds one more GPU while validation runs. Also accepted by `modal_run_refiner.py::validate` |
 
 ## Output
 

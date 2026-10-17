@@ -33,3 +33,6 @@ path_output_dir: ""
 # Structure-model seed for the of3/native_af3 validation step only — separate from seed above. The receptor's
 # predicted conformation is seed-sensitive, so worth setting explicitly rather than AF3's default.
 validation_seed: 0
+# Validation step only (run_validation): at most this many validation jobs run at once, one GPU each, the rest wait.
+# Keep it at or below your Modal GPU limit; the refiner loop itself holds one more GPU while validation runs.
+validation_max_gpus: 5

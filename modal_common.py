@@ -36,6 +36,7 @@ def load_config(path: str) -> dict:
 # without redefining the function or rebuilding its image.
 GPU_TYPE = "H100"
 TIMEOUT_SECONDS = 5 * 60 * 60
+DEFAULT_MAX_GPUS = 5   # validation jobs running at once (one GPU each); keeps a batch under the workspace GPU limit
 
 # StructurePredictionInputs.py (base validation) and StrucTools.py (binding
 # interface / ipSAE helpers) are needed by both RunESMFold2 and RunBoltz2.
@@ -377,9 +378,10 @@ def _spawn_validation_job(job: dict, path_job: str, gpu_type: str):
 
 def execute_validation(designs, models, seeds, num_samples: int, output_dir: str, epitope_residues: str = "",
                        paratope_residues: str = "", max_jobs: int = 200, gpu_type: str = GPU_TYPE,
-                       flush_every: int = 10, poll_seconds: int = 15) -> None:
+                       max_gpus: int = DEFAULT_MAX_GPUS, flush_every: int = 10, poll_seconds: int = 15) -> None:
     """
-    Runs every design x model x seed job in parallel and writes the results folder under
+    Runs every design x model x seed job, at most `max_gpus` at a time (one GPU each, so this keeps a big batch
+    under the workspace's GPU limit), and writes the results folder under
     {OUTPUTS_MOUNT}/{output_dir}: validation_results.csv (one row per finished job), validation_summary.csv,
     failures.csv. Jobs are spawned (not mapped) so each result is matched to its job and a failed job lands in
     failures.csv instead of ending the batch; files are rewritten every `flush_every` finished jobs, so a driver
@@ -391,12 +393,20 @@ def execute_validation(designs, models, seeds, num_samples: int, output_dir: str
     import validation_core as vc
 
     jobs = vc.expand_jobs(designs, models, seeds, num_samples=num_samples, max_jobs=max_jobs)
+    if max_gpus < 1:
+        raise ValueError(f"max_gpus must be at least 1, got {max_gpus}")
     out_dir = os.path.join(OUTPUTS_MOUNT, output_dir)
-    pending = {}
-    for job in jobs:
-        folder = vc.job_folder(job["design_name"], job["model"], job["seed"])
-        pending[len(pending)] = (job, folder, _spawn_validation_job(job, os.path.join(out_dir, folder), gpu_type))
-    print(f"Spawned {len(pending)} validation jobs; writing results to {out_dir}")
+    waiting = list(enumerate(jobs))   # not started yet, in order
+    pending = {}                      # started, not finished
+
+    def start_jobs():
+        while waiting and len(pending) < max_gpus:
+            key, job = waiting.pop(0)
+            folder = vc.job_folder(job["design_name"], job["model"], job["seed"])
+            pending[key] = (job, folder, _spawn_validation_job(job, os.path.join(out_dir, folder), gpu_type))
+
+    print(f"Running {len(jobs)} validation jobs, up to {max_gpus} at a time; writing results to {out_dir}")
+    start_jobs()
 
     rows, failures = [], []
 
@@ -430,9 +440,10 @@ def execute_validation(designs, models, seeds, num_samples: int, output_dir: str
                              "design_id": folder.replace("/", "_"), "path_job": os.path.join(output_dir, folder)})
             del pending[key]
             finished_since_flush += 1
+        start_jobs()
         if finished_since_flush >= flush_every or not pending:
             flush()
             finished_since_flush = 0
-            print(f"{len(rows)} done, {len(failures)} failed, {len(pending)} running")
+            print(f"{len(rows)} done, {len(failures)} failed, {len(pending)} running, {len(waiting)} waiting")
         if pending:
             time.sleep(poll_seconds)

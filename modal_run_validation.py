@@ -18,7 +18,7 @@ import yaml
 
 import validation_core as vc
 from modal_common import (
-    app, load_config, GPU_TYPE, TIMEOUT_SECONDS, OUTPUTS_MOUNT, outputs_volume,
+    app, load_config, GPU_TYPE, TIMEOUT_SECONDS, DEFAULT_MAX_GPUS, OUTPUTS_MOUNT, outputs_volume,
     OUTPUTS_VOLUME_NAME, SUPPORTED_VALIDATION_MODELS, execute_validation, resolve_output_subdir,
 )
 
@@ -34,7 +34,7 @@ _driver_image = (
 @app.function(image=_driver_image, volumes={OUTPUTS_MOUNT: outputs_volume}, timeout=TIMEOUT_SECONDS)
 def run_validation(designs_csv: str, models: list, seeds: list, num_samples: int, output_dir: str,
                    epitope_residues: str = "", paratope_residues: str = "", max_jobs: int = 200,
-                   gpu_type: str = GPU_TYPE, settings: dict = None) -> str:
+                   gpu_type: str = GPU_TYPE, max_gpus: int = DEFAULT_MAX_GPUS, settings: dict = None) -> str:
     designs = vc.load_designs(pd.read_csv(io.StringIO(designs_csv), dtype=str, keep_default_na=False))
     out_dir = os.path.join(OUTPUTS_MOUNT, output_dir)
     os.makedirs(out_dir, exist_ok=True)
@@ -43,13 +43,13 @@ def run_validation(designs_csv: str, models: list, seeds: list, num_samples: int
         yaml.safe_dump(settings, f, sort_keys=False)
     outputs_volume.commit()  # inputs and settings are on the volume even if the run later times out
     execute_validation(designs, models, seeds, num_samples, output_dir, epitope_residues, paratope_residues,
-                       max_jobs, gpu_type)
+                       max_jobs, gpu_type, max_gpus)
     return out_dir
 
 
 # Defaults live here once: they are the flag defaults below and also what a --config file falls back to.
 DEFAULTS = dict(models="of3", seeds="0", num_samples=5, epitope_residues="", paratope_residues="",
-                max_jobs=200, gpu_type=GPU_TYPE)
+                max_jobs=200, gpu_type=GPU_TYPE, max_gpus=DEFAULT_MAX_GPUS)
 
 
 def _as_list(value, cast) -> list:
@@ -65,14 +65,15 @@ def _as_list(value, cast) -> list:
 def validate_designs(config: str = "", input: str = "", models: str = DEFAULTS["models"], seeds: str = DEFAULTS["seeds"],
                      num_samples: int = DEFAULTS["num_samples"], output_dir: str = "",
                      epitope_residues: str = DEFAULTS["epitope_residues"], paratope_residues: str = DEFAULTS["paratope_residues"],
-                     max_jobs: int = DEFAULTS["max_jobs"], gpu_type: str = DEFAULTS["gpu_type"]):
+                     max_jobs: int = DEFAULTS["max_jobs"], gpu_type: str = DEFAULTS["gpu_type"],
+                     max_gpus: int = DEFAULTS["max_gpus"]):
     # --config, when given, replaces every other flag (same convention as refiner/predict).
     if config:
         settings = load_config(config)
     else:
         settings = dict(input=input, models=models, seeds=seeds, num_samples=num_samples, output_dir=output_dir,
                         epitope_residues=epitope_residues, paratope_residues=paratope_residues,
-                        max_jobs=max_jobs, gpu_type=gpu_type)
+                        max_jobs=max_jobs, gpu_type=gpu_type, max_gpus=max_gpus)
     missing = [k for k in ("input", "output_dir") if not settings.get(k)]
     if missing:
         raise ValueError(f"{missing} required (as flags, or as fields in --config)")
@@ -96,6 +97,6 @@ def validate_designs(config: str = "", input: str = "", models: str = DEFAULTS["
     # .spawn() so the local process can exit right away without stopping the run (see refiner()).
     call = run_validation.spawn(
         designs_csv, models, seeds, settings["num_samples"], output_dir, settings["epitope_residues"],
-        settings["paratope_residues"], settings["max_jobs"], settings["gpu_type"], recorded)
-    print(f"Spawned {len(jobs)} validation jobs ({len(designs)} designs x {len(models)} models x {len(seeds)} seeds) "
-          f"as function call {call.object_id}; results go to {output_dir}/ on the outputs volume `{OUTPUTS_VOLUME_NAME}`.")
+        settings["paratope_residues"], settings["max_jobs"], settings["gpu_type"], settings["max_gpus"], recorded)
+    print(f"Spawned {len(jobs)} validation jobs ({len(designs)} designs x {len(models)} models x {len(seeds)} seeds, "
+          f"{settings['max_gpus']} at a time) as function call {call.object_id}; results go to {output_dir}/ on the outputs volume `{OUTPUTS_VOLUME_NAME}`.")

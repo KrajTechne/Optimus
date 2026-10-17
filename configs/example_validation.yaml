@@ -17,4 +17,6 @@ epitope_residues: ""
 paratope_residues: ""
 # Refuses to start if designs x models x seeds exceeds this.
 max_jobs: 200
+# Jobs running at once (one GPU each); keep at or below your Modal GPU limit.
+max_gpus: 5
 gpu_type: H100
