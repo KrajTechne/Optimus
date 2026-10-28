@@ -7,17 +7,23 @@ import biotite.structure as struc
 import biotite.structure.io.pdb as pdb
 import biotite.structure.io.pdbx as pdbx
 
-def extract_atom_array(struc_file_path: str, ca_only = False):
+def extract_atom_array(struc_file_path: str, ca_only: bool = False, load_b_factor: bool = False) -> struc.AtomArray:
     """ Extract atom array from either CIF File or PDB File.
         Preserves b_factor (used to store per-residue pLDDT in ESMFold2/Boltz2 outputs)
         for visualization — biotite drops it by default unless requested via extra_fields.
     """
     if struc_file_path.endswith(".cif"):
         pdbx_file = pdbx.CIFFile.read(struc_file_path)
-        atom_array = pdbx.get_structure(pdbx_file=pdbx_file, model = 1, extra_fields=["b_factor"])
+        if load_b_factor:
+            atom_array = pdbx.get_structure(pdbx_file=pdbx_file, model = 1, extra_fields=["b_factor"])
+        else:
+            atom_array = pdbx.get_structure(pdbx_file=pdbx_file, model = 1)
     elif struc_file_path.endswith(".pdb"):
         pdb_file = pdb.PDBFile.read(struc_file_path)
-        atom_array = pdb_file.get_structure(model = 1, extra_fields=["b_factor"])
+        if load_b_factor:
+            atom_array = pdb_file.get_structure(model = 1, extra_fields=["b_factor"])
+        else:
+            atom_array = pdb_file.get_structure(model = 1)
     else:
         raise ValueError("File must be either a PDB or CIF file")
     if ca_only:
@@ -405,6 +411,53 @@ def superimpose_and_calculate_specified_rmsd(atom_array_fixed: struc.AtomArray,
     # 3. Calculate RMSD between desired regions of both structures
     rmsd = struc.rmsd(atom_array_fixed[calculate_rmsd_mask], aligned_atom_array_mobile[calculate_rmsd_mask])
     return rmsd, aligned_atom_array_mobile, align_transformation
+
+def protein_ca_atoms(path_structure: str) -> struc.AtomArray:
+    """One CA per amino-acid residue (an ion such as calcium also has an atom named CA, so filter on residue type)."""
+    ca_atoms = extract_atom_array(path_structure, ca_only=True)
+    return ca_atoms[struc.filter_amino_acids(ca_atoms)]
+
+
+def binder_rmsds(ref_ca: struc.AtomArray, pred_ca: struc.AtomArray, ref_chains: list, pred_chains: list,
+                 sequences: list = None) -> dict:
+    """
+    Binder RMSD (CA, in A) between a reference complex and a prediction of the same sequences. Both inputs come from
+    protein_ca_atoms(); `ref_chains` / `pred_chains` list the matching chain IDs, binder first, then each target.
+    `sequences` (binder, then each target) makes it fail unless every chosen chain, in both structures, has exactly
+    that sequence, so a wrong chain mapping cannot produce a plausible-looking number.
+      rmsd_fold:            superimposed on the binder, binder measured (does the binder fold the same way?)
+      rmsd_pose_target_<X>: superimposed on target X (B, C, ... in order), binder measured (does the binder sit
+                            in the same place relative to that target?)
+    """
+    ref_parts = [ref_ca[ref_ca.chain_id == chain] for chain in ref_chains]
+    pred_parts = [pred_ca[pred_ca.chain_id == chain] for chain in pred_chains]
+    for rc, pc, r, p in zip(ref_chains, pred_chains, ref_parts, pred_parts):
+        if len(r) == 0 or len(p) == 0:
+            raise ValueError(f"chain {rc if len(r) == 0 else pc} has no amino-acid residues in the "
+                             f"{'reference' if len(r) == 0 else 'prediction'}")
+        if len(r) != len(p):
+            raise ValueError(f"reference chain {rc} has {len(r)} residues but predicted chain {pc} has {len(p)}")
+    for who, chains, parts in (("reference", ref_chains, ref_parts), ("predicted", pred_chains, pred_parts)):
+        for i, (chain, part, expected) in enumerate(zip(chains, parts, sequences or [])):
+            found = "".join(str(s) for s in struc.to_sequence(part)[0])
+            if found != expected:
+                differing = [k for k, (a, b) in enumerate(zip(expected, found)) if a != b]
+                first = f"first at position {differing[0] + 1}: expected {expected[differing[0]]}, found {found[differing[0]]}"                     if differing else f"expected {len(expected)} residues, found {len(found)}"
+                raise ValueError(f"{who} chain {chain} is not the {'binder' if i == 0 else 'target ' + chr(ord('A') + i)} "
+                                 f"sequence ({first})")
+    ref, pred = struc.concatenate(ref_parts), struc.concatenate(pred_parts)
+    bounds = np.cumsum([0, *map(len, ref_parts)])
+
+    def chain_mask(i: int) -> np.ndarray:
+        mask = np.zeros(len(ref), dtype=bool)
+        mask[bounds[i]:bounds[i + 1]] = True
+        return mask
+
+    binder = chain_mask(0)
+    rmsd = lambda align: float(superimpose_and_calculate_specified_rmsd(ref, pred, align, binder, ca_only=False)[0])
+    return {"rmsd_fold": rmsd(binder),
+            **{f"rmsd_pose_target_{chr(ord('A') + i)}": rmsd(chain_mask(i)) for i in range(1, len(ref_parts))}}
+
 
 def run_superimpose_and_calculate_rmsd_apo_holo_pipeline(pdb_file_path_holo: str, pdb_file_path_apo: str,
                                                          align_mask: np.ndarray, calculate_rmsd_mask: np.ndarray,
