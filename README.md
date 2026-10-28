@@ -155,9 +155,16 @@ ligand it found and how it resolved it, so check that table before running anyth
 through their Chemical Component Dictionary code (stereochemistry is lost), and anything unresolvable is left out (`--strict` makes that
 an error; `--ligands` / `--exclude_het` override). It also records each design's own paratope and epitope as
 `ref_paratope_indices_<chain>` / `ref_epitope_indices_<chain>`, in sequence positions (1-indexed per chain), used as the reference below.
+It also records the file itself as `path_structure_ref` and its chain IDs (binder first, then the targets in `seq_target` order) as
+`ref_chain_ids`, which the RMSD columns below need.
 
 Required columns are `design_name` (letters, digits, `.`, `_`, `-`; unique), `seq_binder`, and `seq_target`. Optional: `ligands`
 (comma-separated SMILES), the `ref_*` columns, and anything else, which is carried through untouched. See `configs/example_designs.csv`.
+
+For the RMSD columns a design also needs `path_structure_ref`, the structure to compare against: a `.pdb`/`.cif` file on your machine (uploaded to
+`<output-dir>/reference/` on the volume when the run starts) or a path already on the volume. A refiner `top_designs.csv` works as is: its
+`path_structure` column is used. `ref_chain_ids` says which reference chain is which (e.g. `H,L,X` = binder H, then targets L and X); blank means
+`A,B,C,...` with A the binder, as in refiner structures. A design without `path_structure_ref` just has no RMSD columns.
 
 **2. Run it:**
 
@@ -186,8 +193,8 @@ the run is spawned, so it keeps going if your terminal closes. Rerunning with th
 
 | File/folder | Contents |
 |---|---|
-| `validation_results.csv` | One row per design x model x seed (best sample by iptm): the model's metrics, `contact_check_passed`, and the interface-consistency columns below |
-| `validation_summary.csv` | One row per design x model: `n_seeds`, mean/min/max of `iptm`, `ipsae_min`, `binder_plddt`, `complex_plddt`, `contact_pass_fraction`, mean consistency, and seed-to-seed overlap |
+| `validation_results.csv` | One row per design x model x seed (best sample by iptm): the model's metrics, `contact_check_passed`, the interface-consistency columns and the RMSD columns below |
+| `validation_summary.csv` | One row per design x model: `n_seeds`, mean/min/max of `iptm`, `ipsae_min`, `binder_plddt`, `complex_plddt`, `rmsd_fold`, each `rmsd_pose_target_<chain>`, `contact_pass_fraction`, mean consistency, seed-to-seed overlap, and `rmsd_pose_worst_target_mean` |
 | `failures.csv` | Jobs that errored on every attempt, with the number of `attempts` (the rest carry on) |
 | `designs.csv`, `run_config.yaml` | Copy of the input and every setting used (`run_config.yaml` works as a `--config` file) |
 | `<design_name>/<model>_seed<N>/` | One folder per job: structures, PAE, MSAs, `all_models_metrics.csv` |
@@ -197,7 +204,8 @@ The CSVs are rewritten every 10 finished jobs, so a timeout keeps the partial re
 **Reading the results.**
 - *Best of N samples:* each seed's score is the best of `--num-samples` samples by iptm, which biases scores upward. Use `--num-samples 1` for an unselected value.
 - *Interface consistency* (when the design has a reference interface): `paratope_recall` / `epitope_recall` are the fraction of the reference's interface residues the model also puts in contact (4.5 A heavy-atom cutoff), and `*_jaccard` penalises extra contacts too. Identical target chains can come back with swapped labels, so every relabeling of identical copies (up to 4) is tried and the best one is used; `chain_assignment` records it (e.g. `B->C;C->B`).
-- *The reference is usually another model's prediction, not ground truth.* Low consistency means the binding mode is not robust across models, not necessarily that the design is wrong; boundary residues also move with small shifts at a fixed cutoff.
+- *Structure RMSD* (CA atoms, in A, against `path_structure_ref`; protein chains only, and each chain used must have exactly the design's sequence, else the design's RMSD columns are blank with a warning): `rmsd_fold` superimposes on the binder and measures the binder, so it is how differently the model folds the binder; `rmsd_pose_target_<chain>` superimposes on that target chain and measures the binder, so it is how far the binder sits from where the reference puts it relative to that target (one column per target). `rmsd_pose_worst_target_mean` is the largest of the per-target seed means. Identical target copies are matched by the relabeling with the lowest total pose RMSD, which can differ from the `chain_assignment` chosen by interface overlap.
+- *The reference is usually another model's prediction, not ground truth.* The RMSD columns, like the consistency ones, measure agreement between the input design and a validation model's re-prediction, not accuracy against an experiment. Low consistency means the binding mode is not robust across models, not necessarily that the design is wrong; boundary residues also move with small shifts at a fixed cutoff.
 - *Noise floor:* with 2+ seeds, `seed_paratope_jaccard` / `seed_epitope_jaccard` measure how much a model agrees with itself across seeds. Read a cross-model consistency of 0.8 against that.
 - *ESMFold2 is not an independent check of an ESMFold2 refinement*, and models disagree in absolute iptm even on the same input, so compare within a model first.
 
