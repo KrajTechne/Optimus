@@ -22,6 +22,7 @@ SCORE_COLUMNS = ("iptm", "ipsae_min", "binder_plddt", "binder_plddt70_fraction",
 CONFIDENT_PLDDT = 70   # "confident" residue, the usual AlphaFold cutoff
 POSE_PREFIX = "rmsd_pose_target_"   # one column per target chain: rmsd_pose_target_B, ...
 CONSISTENCY_COLUMNS = ("paratope_recall", "paratope_jaccard", "epitope_recall", "epitope_jaccard")
+SEGMENTS_COLUMN = r"identical_segments_target_([A-Z])"   # optional per-design column, e.g. "1-130,136-265"
 
 
 # ---------------------------------------------------------------------------------------------- input
@@ -49,6 +50,16 @@ def load_designs(source) -> pd.DataFrame:
         if ref_chains and (len(ref_chains) != expected or len(set(ref_chains)) != expected):
             errors.append(f"line {line} ({name}): ref_chain_ids {ref_chains} must be {expected} different chain IDs "
                           f"(the binder, then each of the {expected - 1} target chain(s))")
+        for column in (c for c in df.columns if re.fullmatch(SEGMENTS_COLUMN, c)):
+            text, letter = getattr(row, column).strip(), re.fullmatch(SEGMENTS_COLUMN, column).group(1)
+            if text:
+                targets = row.seq_target.split(",")
+                try:
+                    if ord(letter) - ord("B") >= len(targets):
+                        raise ValueError(f"there is no target chain {letter} (targets are B..{chr(ord('B') + len(targets) - 1)})")
+                    check_segments(parse_segments(text), targets[ord(letter) - ord("B")])
+                except ValueError as exc:
+                    errors.append(f"line {line} ({name}): {column} {text!r}: {exc}")
         chains = {"seq_binder": [row.seq_binder], "seq_target": row.seq_target.split(",")}
         for column, seqs in chains.items():
             for seq in seqs:
@@ -105,6 +116,71 @@ def _permutations(seq_target: str):
         yield {k: v for part in combo for k, v in part.items()}
 
 
+def parse_segments(text: str) -> list:
+    """'1-130,136-265' -> [(1, 130), (136, 265)]: 1-indexed, inclusive sequence positions within one target chain."""
+    segments = []
+    for part in text.split(","):
+        match = re.fullmatch(r"\s*(\d+)\s*-\s*(\d+)\s*", part)
+        if not match or not 1 <= int(match.group(1)) <= int(match.group(2)):
+            raise ValueError(f"segment {part.strip()!r} must look like 'start-end' with 1 <= start <= end")
+        segments.append((int(match.group(1)), int(match.group(2))))
+    return segments
+
+
+def check_segments(segments: list, sequence: str) -> None:
+    """Segments must be 2 to MAX_IDENTICAL_COPIES non-overlapping, equally long stretches with the same residues."""
+    if not 2 <= len(segments) <= MAX_IDENTICAL_COPIES:
+        raise ValueError(f"needs 2 to {MAX_IDENTICAL_COPIES} segments, got {len(segments)}")
+    if len({end - start for start, end in segments}) != 1:
+        raise ValueError("segments must all have the same length")
+    if max(end for _, end in segments) > len(sequence):
+        raise ValueError(f"segment runs past the end of the {len(sequence)}-residue target chain")
+    ordered = sorted(segments)
+    if any(a_end >= b_start for (_, a_end), (b_start, _) in zip(ordered, ordered[1:])):
+        raise ValueError("segments overlap")
+    if len({sequence[start - 1:end] for start, end in segments}) != 1:
+        raise ValueError("segments do not have identical sequences")
+
+
+def design_segments(design) -> dict:
+    """{target chain letter: [(start, end), ...]} from a design's identical_segments_target_<chain> columns."""
+    found = {}
+    for column, value in design.items():
+        match = re.fullmatch(SEGMENTS_COLUMN, column)
+        if match and str(value).strip():
+            found[match.group(1)] = parse_segments(str(value))
+    return found
+
+
+def _segment_swaps(length: int, segments: list):
+    """(ref position of each predicted position, label) for every way of exchanging the identical segments."""
+    ranges = [np.arange(start - 1, end) for start, end in segments]
+    for order in itertools.permutations(range(len(segments))):          # predicted segment i sits where reference segment order[i] is
+        mapped = np.arange(length)
+        for i, j in enumerate(order):
+            mapped[ranges[i]] = ranges[j]
+        moves = [f"{segments[i][0]}-{segments[i][1]}->{segments[j][0]}-{segments[j][1]}" for i, j in enumerate(order) if i != j]
+        yield mapped, ",".join(moves)
+
+
+def _assignments(seq_target: str, segments: dict = None):
+    """
+    Every way identical target parts may have been swapped between a prediction and its reference: whole identical
+    chains (_permutations) combined with exchanges of the identical segments inside a chain (`segments`, {chain:
+    [(start, end), ...]}). Yields (pred chain -> ref chain, {pred chain: ref position of each pred position}, label);
+    the identity assignment comes first.
+    """
+    lengths = {chr(ord("B") + i): len(seq) for i, seq in enumerate(seq_target.split(","))}
+    per_chain = [[(chain, mapped, label) for mapped, label in _segment_swaps(lengths[chain], chain_segments)]
+                 for chain, chain_segments in (segments or {}).items()]
+    for relabel in _permutations(seq_target):
+        chain_moves = ";".join(f"{k}->{v}" for k, v in relabel.items() if k != v)
+        for combo in itertools.product(*per_chain):
+            segment_moves = ";".join(f"{chain}:{label}" for chain, _, label in combo if label)
+            yield (relabel, {chain: mapped for chain, mapped, _ in combo},
+                   ";".join(x for x in (chain_moves, segment_moves) if x) or "identity")
+
+
 def _overlap(ref: set, pred: set) -> tuple[float, float]:
     """(recall of ref, Jaccard); NaN when the reference is empty."""
     if not ref:
@@ -112,11 +188,12 @@ def _overlap(ref: set, pred: set) -> tuple[float, float]:
     return len(ref & pred) / len(ref), len(ref & pred) / len(ref | pred)
 
 
-def interface_consistency(ref: dict, pred: dict, seq_target: str) -> dict:
+def interface_consistency(ref: dict, pred: dict, seq_target: str, segments: dict = None) -> dict:
     """
     How well `pred`'s paratope/epitope reproduces `ref`'s, both as `{paratope|epitope}_indices_<chain>` strings
-    in sequence-position numbering. Identical target copies may come back with swapped labels, so the
-    relabeling with the best combined (paratope + epitope) Jaccard is used, one relabeling for both sides.
+    in sequence-position numbering. Identical target copies (whole chains, or the `segments` of one chain) may
+    come back swapped, so the assignment with the best combined (paratope + epitope) Jaccard is used, one
+    assignment for both sides.
     """
     letters = "".join(chr(ord("B") + i) for i in range(len(seq_target.split(","))))
     ref_para, ref_epi = _interface(ref, "paratope_indices", letters), _interface(ref, "epitope_indices", letters)
@@ -124,17 +201,18 @@ def interface_consistency(ref: dict, pred: dict, seq_target: str) -> dict:
         return {}
     pred_para, pred_epi = _interface(pred, "paratope_indices", letters), _interface(pred, "epitope_indices", letters)
     best = None
-    for relabel in _permutations(seq_target):
+    for relabel, positions, label in _assignments(seq_target, segments):
+        # Paratope positions are binder residues (only the chain label can change); epitope positions are target
+        # residues, which also move when identical segments are exchanged.
         para = {(relabel[c], p) for c, p in pred_para}
-        epi = {(relabel[c], p) for c, p in pred_epi}
+        epi = {(relabel[c], int(positions[c][p - 1]) + 1 if c in positions and p <= len(positions[c]) else p) for c, p in pred_epi}
         scores = (*_overlap(ref_para, para), *_overlap(ref_epi, epi))
         total = np.nansum([scores[1], scores[3]])
         if best is None or total > best[0] + 1e-12:
-            best = (total, scores, relabel)
-    _, (para_recall, para_jaccard, epi_recall, epi_jaccard), relabel = best
-    moved = ";".join(f"{k}->{v}" for k, v in relabel.items() if k != v)
+            best = (total, scores, label)
+    _, (para_recall, para_jaccard, epi_recall, epi_jaccard), label = best
     return {"paratope_recall": para_recall, "paratope_jaccard": para_jaccard,
-            "epitope_recall": epi_recall, "epitope_jaccard": epi_jaccard, "chain_assignment": moved or "identity"}
+            "epitope_recall": epi_recall, "epitope_jaccard": epi_jaccard, "chain_assignment": label}
 
 
 def add_interface_consistency(tall: pd.DataFrame, designs: pd.DataFrame) -> pd.DataFrame:
@@ -144,7 +222,7 @@ def add_interface_consistency(tall: pd.DataFrame, designs: pd.DataFrame) -> pd.D
     for row in tall.to_dict(orient="records"):
         design = by_design.loc[row["design_name"]]
         ref = {c[len("ref_"):]: design[c] for c in by_design.columns if c.startswith("ref_")}
-        rows.append(interface_consistency(ref, row, design.seq_target))
+        rows.append(interface_consistency(ref, row, design.seq_target, design_segments(design)))
     return pd.concat([tall.reset_index(drop=True), pd.DataFrame(rows, columns=[*CONSISTENCY_COLUMNS, "chain_assignment"])], axis=1)
 
 
@@ -159,17 +237,24 @@ def add_contact_check(tall: pd.DataFrame, designs: pd.DataFrame, epitope_residue
     return tall.assign(contact_check_passed=passed)
 
 
-def _best_rmsds(ref_ca, ref_chains: list, pred_ca, seq_binder: str, seq_target: str) -> dict:
-    """binder_rmsds() under the target-copy relabeling (identical copies only) with the lowest total pose RMSD."""
+def _best_rmsds(ref_ca, ref_chains: list, pred_ca, seq_binder: str, seq_target: str, segments: dict = None) -> dict:
+    """
+    binder_rmsds() under the assignment of identical target copies (whole chains, or the identical `segments` of
+    a chain) with the lowest total pose RMSD; the winning assignment is returned as `rmsd_assignment`.
+    """
     sequences = [seq_binder, *seq_target.split(",")]
     letters = [chr(ord("B") + i) for i in range(len(ref_chains) - 1)]
     best = None
-    for relabel in _permutations(seq_target):                  # pred chain -> ref chain label
+    for relabel, positions, label in _assignments(seq_target, segments):
         by_ref = {ref: pred for pred, ref in relabel.items()}
-        result = binder_rmsds(ref_ca, pred_ca, ref_chains, ["A", *(by_ref[letter] for letter in letters)], sequences)
+        orders = [None]                                        # binder keeps its order
+        for letter in letters:
+            mapped = positions.get(by_ref[letter])
+            orders.append(None if mapped is None else np.argsort(mapped))   # inverse permutation: reference position -> predicted one
+        result = binder_rmsds(ref_ca, pred_ca, ref_chains, ["A", *(by_ref[letter] for letter in letters)], sequences, orders)
         total = sum(v for k, v in result.items() if k.startswith(POSE_PREFIX))
         if best is None or total < best[0] - 1e-9:
-            best = (total, result)
+            best = (total, {**result, "rmsd_assignment": label})
     return best[1]
 
 
@@ -197,7 +282,7 @@ def add_structure_rmsd(tall: pd.DataFrame, designs: pd.DataFrame) -> pd.DataFram
             if row["design_name"] not in reference:
                 reference[row["design_name"]] = protein_ca_atoms(path_ref)
             rows.append(_best_rmsds(reference[row["design_name"]], ref_chains, protein_ca_atoms(path_pred),
-                                     design.seq_binder, design.seq_target))
+                                     design.seq_binder, design.seq_target, design_segments(design)))
         except Exception as exc:
             if (row["design_name"], str(exc)) not in warned:
                 warned.add((row["design_name"], str(exc)))
@@ -260,7 +345,7 @@ def summarize(tall: pd.DataFrame, designs: pd.DataFrame) -> pd.DataFrame:
     are biased upward by the sample selection. Seed-to-seed overlap (2+ seeds) is the model's own noise floor
     for the interface-consistency columns.
     """
-    seq_target = designs.set_index("design_name").seq_target
+    by_design = designs.set_index("design_name")
     rows = []
     for (design, model), group in tall.groupby(["design_name", "model"], sort=False):
         out = {"design_name": design, "model": model, "n_seeds": len(group)}
@@ -276,7 +361,7 @@ def summarize(tall: pd.DataFrame, designs: pd.DataFrame) -> pd.DataFrame:
         for column in CONSISTENCY_COLUMNS:
             if column in group:
                 out[f"{column}_mean"] = group[column].mean()
-        pairs = [interface_consistency(a, b, seq_target[design])
+        pairs = [interface_consistency(a, b, by_design.seq_target[design], design_segments(by_design.loc[design]))
                  for a, b in itertools.combinations(group.to_dict(orient="records"), 2)]
         pairs = [p for p in pairs if p]
         if pairs:

@@ -419,12 +419,14 @@ def protein_ca_atoms(path_structure: str, load_b_factor: bool = False) -> struc.
 
 
 def binder_rmsds(ref_ca: struc.AtomArray, pred_ca: struc.AtomArray, ref_chains: list, pred_chains: list,
-                 sequences: list = None) -> dict:
+                 sequences: list = None, pred_orders: list = None) -> dict:
     """
     Binder RMSD (CA, in A) between a reference complex and a prediction of the same sequences. Both inputs come from
     protein_ca_atoms(); `ref_chains` / `pred_chains` list the matching chain IDs, binder first, then each target.
     `sequences` (binder, then each target) makes it fail unless every chosen chain, in both structures, has exactly
-    that sequence, so a wrong chain mapping cannot produce a plausible-looking number.
+    that sequence, so a wrong chain mapping cannot produce a plausible-looking number. `pred_orders` (one entry per
+    chain, None to keep the order) reorders a predicted chain's residues before comparing: it is how identical
+    segments inside one chain are swapped (`new_residue[q] = old_residue[order[q]]`).
       rmsd_fold:            superimposed on the binder, binder measured (does the binder fold the same way?)
       rmsd_pose_target_<X>: superimposed on target X (B, C, ... in order), binder measured (does the binder sit
                             in the same place relative to that target?)
@@ -445,6 +447,11 @@ def binder_rmsds(ref_ca: struc.AtomArray, pred_ca: struc.AtomArray, ref_chains: 
                 first = f"first at position {differing[0] + 1}: expected {expected[differing[0]]}, found {found[differing[0]]}"                     if differing else f"expected {len(expected)} residues, found {len(found)}"
                 raise ValueError(f"{who} chain {chain} is not the {'binder' if i == 0 else 'target ' + chr(ord('A') + i)} "
                                  f"sequence ({first})")
+    for i, order in enumerate(pred_orders or []):
+        if order is not None:
+            if len(order) != len(pred_parts[i]):
+                raise ValueError(f"predicted chain {pred_chains[i]} has {len(pred_parts[i])} residues, not {len(order)}")
+            pred_parts[i] = pred_parts[i][order]
     ref, pred = struc.concatenate(ref_parts), struc.concatenate(pred_parts)
     bounds = np.cumsum([0, *map(len, ref_parts)])
 

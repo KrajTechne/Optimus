@@ -59,9 +59,9 @@ This is a general binder-target interface check; it does not on its own confirm 
 | `modal_common.py` | Shared Modal setup: app, per-model images, volumes, timeout, `--config` loading, output-folder checks, the AlphaFold3/OpenFold3 function, and the validation job runner |
 | `Run{ESMFold2,Boltz2,OpenDDE,AlphaFold3}.py` | Per-model structure-prediction integrations |
 | `StructurePredictionInputs.py` | Shared base class (inputs, output-dir handling) all four models inherit from |
-| `StrucTools.py` | Structure analysis utilities — binding-interface/contact determination, ipSAE, structure I/O |
+| `StrucTools.py` | Structure analysis utilities — binding-interface/contact determination, ipSAE, binder RMSD, structure I/O |
 | `designs_from_structures.py` | Builds a validation input CSV (sequences, ligand SMILES, reference interface) from a folder of `.pdb`/`.cif` complexes |
-| `validation_core.py` | Validation input checks, design x model x seed job expansion, interface-consistency scoring and result summaries (no Modal imports) |
+| `validation_core.py` | Validation input checks, design x model x seed job expansion, interface-consistency and structure-RMSD scoring, and result summaries (no Modal imports) |
 | `LigandMPNN/` | Sequence design (vendored) |
 | `mmseqs2.py` | MSA generation via the ColabFold-hosted MMseqs2 API |
 | `configs/` | Example `--config` files for `refiner`, `predict` and `validate_designs`, plus a toy designs CSV |
@@ -89,6 +89,8 @@ modal volume get my_project_outputs <folder> <local path>
 ```
 
 Set it on every run and every `modal volume` command for that project: a run launched without it goes to the default volume. Each entrypoint prints the volume it used when it starts a run. Only the outputs volume is configurable; the Boltz2/OpenDDE weights caches keep their fixed names.
+
+On Windows, if `modal run` stops with a `'charmap' codec can't encode character` error, set `PYTHONUTF8=1` in that shell (`$env:PYTHONUTF8 = "1"` in PowerShell): Modal's progress output uses characters the default console encoding cannot print.
 
 ## Usage
 
@@ -121,6 +123,8 @@ re-running the refiner loop:
 ```
 modal run modal_run_refiner.py::validate --design-name "my_design" --run-validation native_af3
 ```
+
+It also takes `--validation-seed`, `--validation-max-gpus` and `--validation-max-retries` (see Key options), and `--path-output-dir` if the run was written inside a folder. Each validated design is compared with its own refiner structure (the `path_structure` column of `top_designs.csv`), so the RMSD columns described below come out without any extra input.
 
 ### One-off structure prediction (no refinement)
 
@@ -166,6 +170,8 @@ For the RMSD columns a design also needs `path_structure_ref`, the structure to 
 `path_structure` column is used. `ref_chain_ids` says which reference chain is which (e.g. `H,L,X` = binder H, then targets L and X); blank means
 `A,B,C,...` with A the binder, as in refiner structures. A design without `path_structure_ref` just has no RMSD columns.
 
+A target that contains identical parts in one chain (for example two copies of a protein joined by a linker) can say where they are with `identical_segments_target_<chain>`, e.g. `identical_segments_target_B` = `1-130,136-265` (1-indexed, inclusive positions within that target chain; 2 to 4 segments of equal length and identical sequence, checked when the CSV is loaded). The binder may sit on either copy, which is the same pose by symmetry, so the segments are tried in every order: the RMSD columns keep the lowest pose RMSD and the interface-consistency columns the best overlap. Leave it blank for targets without such a repeat. `contact_check_passed` is not changed by it: it checks the exact residues you list, so for a repeated target list the residues of both copies (e.g. `B73,B74,B208,B209`).
+
 **2. Run it:**
 
 ```
@@ -196,15 +202,16 @@ the run is spawned, so it keeps going if your terminal closes. Rerunning with th
 | `validation_results.csv` | One row per design x model x seed (best sample by iptm): the model's metrics, `contact_check_passed`, the interface-consistency columns and the RMSD columns below |
 | `validation_summary.csv` | One row per design x model: `n_seeds`, mean/min/max of `iptm`, `ipsae_min`, `binder_plddt`, `complex_plddt`, `binder_plddt70_fraction`, `rmsd_fold`, each `rmsd_pose_target_<chain>`, `contact_pass_fraction`, mean consistency, seed-to-seed overlap, and `rmsd_pose_worst_target_mean` |
 | `failures.csv` | Jobs that errored on every attempt, with the number of `attempts` (the rest carry on) |
-| `designs.csv`, `run_config.yaml` | Copy of the input and every setting used (`run_config.yaml` works as a `--config` file) |
+| `designs.csv`, `run_config.yaml` | The checked input (with automatic columns filled in and local reference paths rewritten to their volume location) and every setting used (`run_config.yaml` works as a `--config` file) |
+| `reference/` | The reference structures uploaded from your machine (only when `path_structure_ref` pointed at local files) |
 | `<design_name>/<model>_seed<N>/` | One folder per job: structures, PAE, MSAs, `all_models_metrics.csv` |
 
 The CSVs are rewritten every 10 finished jobs, so a timeout keeps the partial results.
 
 **Reading the results.**
 - *Best of N samples:* each seed's score is the best of `--num-samples` samples by iptm, which biases scores upward. Use `--num-samples 1` for an unselected value.
-- *Interface consistency* (when the design has a reference interface): `paratope_recall` / `epitope_recall` are the fraction of the reference's interface residues the model also puts in contact (4.5 A heavy-atom cutoff), and `*_jaccard` penalises extra contacts too. Identical target chains can come back with swapped labels, so every relabeling of identical copies (up to 4) is tried and the best one is used; `chain_assignment` records it (e.g. `B->C;C->B`).
-- *Structure RMSD* (CA atoms, in A, against `path_structure_ref`; protein chains only, and each chain used must have exactly the design's sequence, else the design's RMSD columns are blank with a warning): `rmsd_fold` superimposes on the binder and measures the binder, so it is how differently the model folds the binder; `rmsd_pose_target_<chain>` superimposes on that target chain and measures the binder, so it is how far the binder sits from where the reference puts it relative to that target (one column per target). `rmsd_pose_worst_target_mean` is the largest of the per-target seed means. Identical target copies are matched by the relabeling with the lowest total pose RMSD, which can differ from the `chain_assignment` chosen by interface overlap.
+- *Interface consistency* (when the design has a reference interface): `paratope_recall` / `epitope_recall` are the fraction of the reference's interface residues the model also puts in contact (4.5 A heavy-atom cutoff), and `*_jaccard` penalises extra contacts too. Identical target chains can come back with swapped labels, so every relabeling of identical copies (up to 4) is tried and the best one is used; `chain_assignment` records it (e.g. `B->C;C->B`, or `B:1-130->136-265,136-265->1-130` when `identical_segments_target_B` is given).
+- *Structure RMSD* (CA atoms, in A, against `path_structure_ref`; protein chains only, and each chain used must have exactly the design's sequence, else the design's RMSD columns are blank with a warning): `rmsd_fold` superimposes on the binder and measures the binder, so it is how differently the model folds the binder; `rmsd_pose_target_<chain>` superimposes on that target chain and measures the binder, so it is how far the binder sits from where the reference puts it relative to that target (one column per target). `rmsd_pose_worst_target_mean` is the largest of the per-target seed means. Identical target copies (whole chains, or the segments of `identical_segments_target_<chain>`) are matched by the assignment with the lowest total pose RMSD, recorded in `rmsd_assignment`; it can differ from the `chain_assignment` chosen by interface overlap.
 - *`binder_plddt70_fraction`* is the share of binder residues with pLDDT of at least 70 in the model's prediction (0 to 1; needs no reference). When it is low, the prediction has little confident binder structure and the RMSD columns say little: a binder the model cannot fold can still show a small `rmsd_fold` over its few ordered residues, or a meaningless one over a disordered chain. Read the RMSD together with this column.
 - *The reference is usually another model's prediction, not ground truth.* The RMSD columns, like the consistency ones, measure agreement between the input design and a validation model's re-prediction, not accuracy against an experiment. Low consistency means the binding mode is not robust across models, not necessarily that the design is wrong; boundary residues also move with small shifts at a fixed cutoff.
 - *Noise floor:* with 2+ seeds, `seed_paratope_jaccard` / `seed_epitope_jaccard` measure how much a model agrees with itself across seeds. Read a cross-model consistency of 0.8 against that.
@@ -265,4 +272,4 @@ Written under `<path_output_dir>/<design_name>/` (the volume root is the default
 | `runs/run_{N}/` | Per-cycle structures (`.cif`/`.pdb`), PAE, `cycle_metrics.png` |
 | `improved_insilico/` | PDB + input spec for every passing cycle |
 | `validation_{run_validation}/` | The validation step's results in the standalone layout (see "Validating designs you already have"): `validation_results.csv`, `validation_summary.csv`, `failures.csv`, and one folder per design `<design_name>/<model>_seed<N>/`. A failed validation job no longer stops the run: check `failures.csv` |
-| `top_designs_validated_{run_validation}.csv` | `top_designs.csv` merged with the validator's own metrics (`val_`-prefixed, e.g. `val_iptm`, `val_model`, `val_contact_check_passed`, plus the interface-consistency columns); a design whose validation job failed has empty `val_` columns |
+| `top_designs_validated_{run_validation}.csv` | `top_designs.csv` merged with the validator's own metrics (`val_`-prefixed, e.g. `val_iptm`, `val_model`, `val_contact_check_passed`, `val_binder_plddt70_fraction`, plus the interface-consistency and `val_rmsd_*` columns); a design whose validation job failed has empty `val_` columns |
