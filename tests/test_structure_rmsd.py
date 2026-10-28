@@ -8,7 +8,7 @@ import pytest
 import modal_common
 from designs_from_structures import designs_from_structures
 from StrucTools import binder_rmsds, protein_ca_atoms
-from validation_core import add_structure_rmsd, load_designs, plan_reference_uploads, summarize
+from validation_core import add_binder_plddt70_fraction, add_structure_rmsd, load_designs, plan_reference_uploads, summarize
 
 rng = np.random.default_rng(0)
 BINDER, TARGET_B, TARGET_C = (rng.normal(scale=8, size=(8, 3)) for _ in range(3))
@@ -251,4 +251,32 @@ def test_a_failing_rmsd_step_does_not_cost_the_run_its_results(tmp_path, monkeyp
     modal_common.execute_validation(designs, ["of3"], [1], 1, "out", poll_seconds=0, flush_every=1)
     tall = pd.read_csv(tmp_path / "out" / "validation_results.csv")
     assert len(tall) == 1 and "rmsd_fold" not in tall
-    assert "WARNING: structure RMSD skipped for 1 job(s): RuntimeError: volume busy" in capsys.readouterr().out
+    assert "WARNING: structure scoring (RMSD, binder confidence) skipped for 1 job(s): RuntimeError: volume busy" in capsys.readouterr().out
+
+
+# ------------------------------------------------------------------------------------ binder confidence
+
+def write_with_plddt(path, binder_plddt, target_plddt=(95.0,) * 8):
+    atoms = [struc.Atom(xyz, chain_id=chain, res_id=i + 1, res_name="ALA", atom_name="CA", element="C")
+             for chain, coords in (("A", BINDER), ("B", TARGET_B)) for i, xyz in enumerate(coords)]
+    array = struc.array(atoms)
+    array.set_annotation("b_factor", np.array([*binder_plddt, *target_plddt], dtype=float))
+    file = pdb.PDBFile()
+    file.set_structure(array)
+    file.write(str(path))
+    return str(path)
+
+
+def test_binder_plddt70_fraction_counts_only_confident_binder_residues(tmp_path):
+    low_target = write_with_plddt(tmp_path / "a.pdb", [90, 80, 70, 69.9, 50, 20, 95, 99], target_plddt=(10.0,) * 8)
+    scaled = write_with_plddt(tmp_path / "b.pdb", [0.9, 0.8, 0.7, 0.69, 0.5, 0.2, 0.95, 0.99])    # 0-1 scale
+    tall = pd.DataFrame({"path_structure": [low_target, scaled, str(tmp_path / "missing.pdb")]})
+    out = add_binder_plddt70_fraction(tall).binder_plddt70_fraction
+    assert out[0] == pytest.approx(5 / 8) and out[1] == pytest.approx(5 / 8) and np.isnan(out[2])   # target ignored, bad file blank
+
+
+def test_binder_confidence_needs_no_reference_and_reaches_the_summary():
+    designs = load_designs(pd.DataFrame({"design_name": ["d1"], "seq_binder": ["AC"], "seq_target": ["GG"]}))
+    tall = pd.DataFrame({"design_name": "d1", "model": "of3", "seed": [1, 2], "binder_plddt70_fraction": [0.2, 0.6]})
+    summary = summarize(tall, designs).iloc[0]
+    assert summary.binder_plddt70_fraction_mean == pytest.approx(0.4) and summary.binder_plddt70_fraction_max == 0.6

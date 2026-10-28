@@ -412,9 +412,9 @@ def superimpose_and_calculate_specified_rmsd(atom_array_fixed: struc.AtomArray,
     rmsd = struc.rmsd(atom_array_fixed[calculate_rmsd_mask], aligned_atom_array_mobile[calculate_rmsd_mask])
     return rmsd, aligned_atom_array_mobile, align_transformation
 
-def protein_ca_atoms(path_structure: str) -> struc.AtomArray:
+def protein_ca_atoms(path_structure: str, load_b_factor: bool = False) -> struc.AtomArray:
     """One CA per amino-acid residue (an ion such as calcium also has an atom named CA, so filter on residue type)."""
-    ca_atoms = extract_atom_array(path_structure, ca_only=True)
+    ca_atoms = extract_atom_array(path_structure, ca_only=True, load_b_factor=load_b_factor)
     return ca_atoms[struc.filter_amino_acids(ca_atoms)]
 
 

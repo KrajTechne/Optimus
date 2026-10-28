@@ -416,20 +416,22 @@ def execute_validation(designs, models, seeds, num_samples: int, output_dir: str
     start_jobs()
 
     rows, failures = [], []
-    rmsd_done = 0   # rows already scored against their reference structure
+    scored = 0   # rows already scored from their structure files (RMSD, binder confidence)
 
     def flush():
-        nonlocal rmsd_done
+        nonlocal scored
         os.makedirs(out_dir, exist_ok=True)
         pd.DataFrame(failures, columns=["design_name", "model", "seed", "attempts", "error"]).to_csv(
             os.path.join(out_dir, "failures.csv"), index=False)
-        if rows[rmsd_done:]:
-            try:   # an optional extra: whatever goes wrong here must not cost the run its results
+        if rows[scored:]:
+            try:   # optional extras: whatever goes wrong here must not cost the run its results
                 outputs_volume.reload()   # the job containers wrote the predicted structures; make them visible here
-                rows[rmsd_done:] = vc.add_structure_rmsd(pd.DataFrame(rows[rmsd_done:]), designs).to_dict(orient="records")
+                new = vc.add_binder_plddt70_fraction(vc.add_structure_rmsd(pd.DataFrame(rows[scored:]), designs))
+                rows[scored:] = new.to_dict(orient="records")
             except Exception as exc:
-                print(f"WARNING: structure RMSD skipped for {len(rows) - rmsd_done} job(s): {type(exc).__name__}: {exc}")
-            rmsd_done = len(rows)
+                print(f"WARNING: structure scoring (RMSD, binder confidence) skipped for {len(rows) - scored} job(s): "
+                      f"{type(exc).__name__}: {exc}")
+            scored = len(rows)
         if rows:
             tall = vc.add_contact_check(pd.DataFrame(rows), designs, epitope_residues, paratope_residues)
             tall = vc.add_interface_consistency(tall, designs)

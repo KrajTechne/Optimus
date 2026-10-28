@@ -18,7 +18,8 @@ MODELS = ("of3", "native_af3", "esmfold2")
 REQUIRED_COLUMNS = ("design_name", "seq_binder", "seq_target")
 AMINO_ACIDS = set("ACDEFGHIKLMNPQRSTVWY")
 MAX_IDENTICAL_COPIES = 4          # identical target chains are matched by trying every permutation
-SCORE_COLUMNS = ("iptm", "ipsae_min", "binder_plddt", "complex_plddt", "rmsd_fold")
+SCORE_COLUMNS = ("iptm", "ipsae_min", "binder_plddt", "binder_plddt70_fraction", "complex_plddt", "rmsd_fold")
+CONFIDENT_PLDDT = 70   # "confident" residue, the usual AlphaFold cutoff
 POSE_PREFIX = "rmsd_pose_target_"   # one column per target chain: rmsd_pose_target_B, ...
 CONSISTENCY_COLUMNS = ("paratope_recall", "paratope_jaccard", "epitope_recall", "epitope_jaccard")
 
@@ -203,6 +204,24 @@ def add_structure_rmsd(tall: pd.DataFrame, designs: pd.DataFrame) -> pd.DataFram
                 print(f"WARNING: no RMSD for {row['design_name']} ({row.get('model', '')} seed {row.get('seed', '')}): {exc}")
             rows.append({})
     return pd.concat([tall.reset_index(drop=True), pd.DataFrame(rows, index=range(len(rows)))], axis=1)
+
+
+def add_binder_plddt70_fraction(tall: pd.DataFrame) -> pd.DataFrame:
+    """
+    `binder_plddt70_fraction` per job: the share of binder (chain A) residues whose pLDDT is at least 70, read from
+    the predicted structure's B-factors (every validation model stores pLDDT there). A prediction in which little of
+    the binder is confident has no meaningful RMSD. Blank when the structure cannot be read.
+    """
+    fractions = []
+    for path in tall.get("path_structure", pd.Series("", index=tall.index)):
+        try:
+            ca = protein_ca_atoms(str(path), load_b_factor=True)
+            plddt = ca.b_factor[ca.chain_id == "A"]
+            plddt = plddt * 100 if plddt.max() <= 1.0 else plddt      # some writers use a 0-1 scale
+            fractions.append(float((plddt >= CONFIDENT_PLDDT).mean()))
+        except Exception:
+            fractions.append(np.nan)
+    return tall.assign(binder_plddt70_fraction=fractions)
 
 
 def plan_reference_uploads(designs: pd.DataFrame, output_dir: str, outputs_mount: str) -> tuple[pd.DataFrame, list]:
