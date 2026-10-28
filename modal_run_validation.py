@@ -90,9 +90,14 @@ def validate_designs(config: str = "", input: str = "", models: str = DEFAULTS["
     # Everything that can be checked without a GPU is checked here, before anything is started.
     designs = vc.load_designs(settings["input"])
     jobs = vc.expand_jobs(designs, models, seeds, settings["num_samples"], settings["max_jobs"])
-
-    with open(settings["input"], encoding="utf-8") as f:
-        designs_csv = f.read()
+    # Reference structures on this machine go to the volume; the driver reads them from there.
+    designs, uploads = vc.plan_reference_uploads(designs, output_dir, OUTPUTS_MOUNT)
+    if uploads:
+        with outputs_volume.batch_upload(force=True) as batch:
+            for local, remote in uploads:
+                batch.put_file(local, remote)
+        print(f"Uploaded {len(uploads)} reference structure(s) to {output_dir}/reference/ on `{OUTPUTS_VOLUME_NAME}`.")
+    designs_csv = designs.to_csv(index=False)
     # Usable as a --config file (outputs_volume is only a record: the volume comes from OPTIMUS_OUTPUTS_VOLUME).
     recorded = {**settings, "models": models, "seeds": seeds, "output_dir": output_dir, "outputs_volume": OUTPUTS_VOLUME_NAME}
     # .spawn() so the local process can exit right away without stopping the run (see refiner()).
