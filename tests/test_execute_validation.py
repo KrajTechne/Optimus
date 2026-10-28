@@ -29,6 +29,7 @@ def samples(iptm):
 def run(tmp_path, monkeypatch):
     monkeypatch.setattr(modal_common, "OUTPUTS_MOUNT", str(tmp_path))
     monkeypatch.setattr(modal_common.outputs_volume, "commit", lambda: None)
+    monkeypatch.setattr(modal_common.outputs_volume, "reload", lambda: None)
     designs = vc.load_designs(pd.DataFrame({"design_name": ["good", "bad"], "seq_binder": ["ACDE", "ACDF"], "seq_target": ["GGHH", "GGHH"],
                                             "ref_paratope_indices_B": ["1,2", "1,2"], "ref_epitope_indices_B": ["5,6", "5,6"]}))
 
