@@ -6,18 +6,20 @@ A *design* is one row of the input CSV; a *job* is one design x model x seed; th
 row per finished job; the *summary* has one row per design x model.
 """
 import itertools
+import os
 import re
 
 import numpy as np
 import pandas as pd
 
-from StrucTools import binder_binds_all_targets
+from StrucTools import binder_binds_all_targets, binder_rmsds, protein_ca_atoms
 
 MODELS = ("of3", "native_af3", "esmfold2")
 REQUIRED_COLUMNS = ("design_name", "seq_binder", "seq_target")
 AMINO_ACIDS = set("ACDEFGHIKLMNPQRSTVWY")
 MAX_IDENTICAL_COPIES = 4          # identical target chains are matched by trying every permutation
-SCORE_COLUMNS = ("iptm", "ipsae_min", "binder_plddt", "complex_plddt")
+SCORE_COLUMNS = ("iptm", "ipsae_min", "binder_plddt", "complex_plddt", "rmsd_fold")
+POSE_PREFIX = "rmsd_pose_target_"   # one column per target chain: rmsd_pose_target_B, ...
 CONSISTENCY_COLUMNS = ("paratope_recall", "paratope_jaccard", "epitope_recall", "epitope_jaccard")
 
 
@@ -30,15 +32,22 @@ def load_designs(source) -> pd.DataFrame:
     if missing:
         raise ValueError(f"designs CSV is missing required column(s): {missing}")
 
-    # A refiner top_designs.csv carries its own interface; treat it as the reference.
-    if not any(c.startswith("ref_") for c in df.columns):
+    # A refiner top_designs.csv carries its own interface and structure; treat them as the reference.
+    if not any(re.match(r"ref_(paratope|epitope)_indices_[A-Z]$", c) for c in df.columns):
         df = df.rename(columns={c: f"ref_{c}" for c in df.columns if re.match(r"(paratope|epitope)_indices_[A-Z]$", c)})
+    if "path_structure_ref" not in df.columns and "path_structure" in df.columns:
+        df = df.assign(path_structure_ref=df.path_structure)
 
     errors = []
     for line, row in enumerate(df.itertuples(), start=2):      # CSV line numbers: header is line 1
         name = row.design_name.strip()
         if not re.fullmatch(r"[A-Za-z0-9._-]+", name) or name in (".", ".."):
             errors.append(f"line {line}: design_name {name!r} must be letters, digits, '.', '_' or '-' (it becomes a folder name)")
+        ref_chains = [c.strip() for c in getattr(row, "ref_chain_ids", "").split(",") if c.strip()]
+        expected = 1 + len(row.seq_target.split(","))
+        if ref_chains and (len(ref_chains) != expected or len(set(ref_chains)) != expected):
+            errors.append(f"line {line} ({name}): ref_chain_ids {ref_chains} must be {expected} different chain IDs "
+                          f"(the binder, then each of the {expected - 1} target chain(s))")
         chains = {"seq_binder": [row.seq_binder], "seq_target": row.seq_target.split(",")}
         for column, seqs in chains.items():
             for seq in seqs:
@@ -149,6 +158,81 @@ def add_contact_check(tall: pd.DataFrame, designs: pd.DataFrame, epitope_residue
     return tall.assign(contact_check_passed=passed)
 
 
+def _best_rmsds(ref_ca, ref_chains: list, pred_ca, seq_binder: str, seq_target: str) -> dict:
+    """binder_rmsds() under the target-copy relabeling (identical copies only) with the lowest total pose RMSD."""
+    sequences = [seq_binder, *seq_target.split(",")]
+    letters = [chr(ord("B") + i) for i in range(len(ref_chains) - 1)]
+    best = None
+    for relabel in _permutations(seq_target):                  # pred chain -> ref chain label
+        by_ref = {ref: pred for pred, ref in relabel.items()}
+        result = binder_rmsds(ref_ca, pred_ca, ref_chains, ["A", *(by_ref[letter] for letter in letters)], sequences)
+        total = sum(v for k, v in result.items() if k.startswith(POSE_PREFIX))
+        if best is None or total < best[0] - 1e-9:
+            best = (total, result)
+    return best[1]
+
+
+def add_structure_rmsd(tall: pd.DataFrame, designs: pd.DataFrame) -> pd.DataFrame:
+    """
+    `rmsd_fold` and `rmsd_pose_target_<X>` per job, against each design's `path_structure_ref` (reference chains
+    from `ref_chain_ids`, blank = A, B, C, ... as in a refiner structure) using the job's predicted `path_structure`.
+    Every chain used must have exactly the design's sequence in both structures. Blank when a design has no
+    reference; a file that is missing or does not match the design gives blanks and a warning rather than
+    failing the run. Computed driver-side so it needs no GPU and can be re-run.
+    """
+    by_design = designs.set_index("design_name")
+    reference, warned, rows = {}, set(), []
+    for row in tall.to_dict(orient="records"):
+        design = by_design.loc[row["design_name"]]
+        path_ref = str(design.get("path_structure_ref", "")).strip()
+        path_pred = str(row.get("path_structure", "")).strip()
+        if not path_ref or not path_pred:
+            rows.append({})
+            continue
+        try:
+            num_targets = len(design.seq_target.split(","))
+            ref_chains = ([c.strip() for c in str(design.get("ref_chain_ids", "")).split(",") if c.strip()]
+                          or [chr(ord("A") + i) for i in range(num_targets + 1)])
+            if row["design_name"] not in reference:
+                reference[row["design_name"]] = protein_ca_atoms(path_ref)
+            rows.append(_best_rmsds(reference[row["design_name"]], ref_chains, protein_ca_atoms(path_pred),
+                                     design.seq_binder, design.seq_target))
+        except Exception as exc:
+            if (row["design_name"], str(exc)) not in warned:
+                warned.add((row["design_name"], str(exc)))
+                print(f"WARNING: no RMSD for {row['design_name']} ({row.get('model', '')} seed {row.get('seed', '')}): {exc}")
+            rows.append({})
+    return pd.concat([tall.reset_index(drop=True), pd.DataFrame(rows, index=range(len(rows)))], axis=1)
+
+
+def plan_reference_uploads(designs: pd.DataFrame, output_dir: str, outputs_mount: str) -> tuple[pd.DataFrame, list]:
+    """
+    Decide where each design's reference structure will be read from on Modal. A file on this machine is to be
+    uploaded to <output_dir>/reference/<design_name><ext> on the outputs volume (`path_structure_ref` is rewritten to
+    where it will appear in the container); a path already under the volume mount (a refiner structure) is kept.
+    Anything else is an error, listed by CSV line. Returns (designs with rewritten paths, [(local, volume_relative)]).
+    """
+    paths, uploads, errors = designs.get("path_structure_ref", pd.Series("", index=designs.index)).tolist(), [], []
+    mount = outputs_mount.rstrip("/") + "/"
+    for line, (name, path) in enumerate(zip(designs.design_name, paths), start=2):
+        path = path.strip()
+        if not path:
+            continue
+        if path.replace("\\", "/").startswith(mount):
+            paths[line - 2] = path.replace("\\", "/")
+        elif not os.path.isfile(path):
+            errors.append(f"line {line} ({name}): path_structure_ref {path!r} is neither a file on this machine nor under {mount} on the volume")
+        elif not path.lower().endswith((".pdb", ".cif")):
+            errors.append(f"line {line} ({name}): path_structure_ref {path!r} must be a .pdb or .cif file")
+        else:
+            remote = f"{output_dir}/reference/{name}{os.path.splitext(path)[1].lower()}"
+            uploads.append((path, remote))
+            paths[line - 2] = f"{mount}{remote}"
+    if errors:
+        raise ValueError("invalid reference structures:\n  " + "\n  ".join(errors))
+    return (designs.assign(path_structure_ref=paths) if "path_structure_ref" in designs else designs), uploads
+
+
 # ------------------------------------------------------------------------------------------ aggregation
 
 def summarize(tall: pd.DataFrame, designs: pd.DataFrame) -> pd.DataFrame:
@@ -161,10 +245,13 @@ def summarize(tall: pd.DataFrame, designs: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for (design, model), group in tall.groupby(["design_name", "model"], sort=False):
         out = {"design_name": design, "model": model, "n_seeds": len(group)}
-        for column in SCORE_COLUMNS:
+        pose_columns = sorted(c for c in group if c.startswith(POSE_PREFIX))
+        for column in [*SCORE_COLUMNS, *pose_columns]:
             if column in group:
                 out |= {f"{column}_mean": group[column].mean(), f"{column}_min": group[column].min(),
                         f"{column}_max": group[column].max()}
+        if pose_columns:   # the target the binder is placed worst against, by seed-averaged pose RMSD
+            out["rmsd_pose_worst_target_mean"] = pd.Series([out[f"{c}_mean"] for c in pose_columns]).max()
         if "contact_check_passed" in group:
             out["contact_pass_fraction"] = group["contact_check_passed"].astype(bool).mean()
         for column in CONSISTENCY_COLUMNS:
