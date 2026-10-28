@@ -7,7 +7,8 @@ Each file is one design: the binder chain becomes `seq_binder`, every other prot
 (`seq_target`, comma-separated, labelled B, C, ... in order, as the pipeline does), and non-polymer
 residues become `ligands` (SMILES). The design's own paratope/epitope is written as sequence-position
 indices (`ref_paratope_indices_B`, `ref_epitope_indices_B`, ...) so validation can score whether another
-model reproduces the same binding mode.
+model reproduces the same binding mode. The file itself is recorded as `path_structure_ref`, with its chain
+IDs (binder first, then the targets in `seq_target` order) in `ref_chain_ids`, for the RMSD columns.
 """
 import argparse
 from collections import Counter
@@ -67,7 +68,8 @@ def design_from_structure(path: Path, binder_chain: str, target_chains, exclude_
         return seq
 
     row = {"design_name": path.stem, "seq_binder": sequence(binder_chain),
-           "seq_target": ",".join(sequence(c) for c in targets)}
+           "seq_target": ",".join(sequence(c) for c in targets),
+           "path_structure_ref": str(path.resolve()), "ref_chain_ids": ",".join([binder_chain, *targets])}
 
     het = atoms[atoms.hetero & ~struc.filter_amino_acids(atoms) & ~struc.filter_solvent(atoms)]
     ligands = []
