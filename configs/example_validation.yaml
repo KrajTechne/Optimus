@@ -12,7 +12,10 @@ models: [of3, esmfold2]
 seeds: [1, 2, 3]
 # Diffusion samples per job; the best by iptm is kept as that seed's result.
 num_samples: 5
-# Desired contact residues for contact_check_passed (e.g. "B73,B74" / "A10,A11"); blank = always passes.
+# Desired contact residues, each <chain letter><position>: epitope on the target chains (B, C, ...), paratope on the
+# binder (A), e.g. "B73,B74" / "A10,A11". Blank = nothing checked. They drive contact_check_passed (at least 2 of
+# each list in contact) and hotspot_epitope_recall / hotspot_paratope_recall (the fraction of each list in contact).
+# The run refuses to start if an entry is malformed, names a chain the design lacks, or lies outside its sequence.
 epitope_residues: ""
 paratope_residues: ""
 # Refuses to start if designs x models x seeds exceeds this.
