@@ -32,3 +32,9 @@ def test_all_targets_must_pass():
     assert binder_binds_all_targets(METRICS, 2, epitope_residues="B73,B74,C73,C80")
     assert not binder_binds_all_targets(METRICS, 2, epitope_residues="B73,B74,C73,C99")
     assert binder_binds_all_targets(METRICS, 1, epitope_residues="B73,B74,C73,C99")  # chain C is not a target here
+
+
+def test_parse_desired_residues():
+    from StrucTools import parse_desired_residues
+    assert parse_desired_residues("B73, B74,A10,") == {"B": {73, 74}, "A": {10}}
+    assert parse_desired_residues("") == {}

@@ -12,7 +12,7 @@ import re
 import numpy as np
 import pandas as pd
 
-from StrucTools import binder_binds_all_targets, binder_rmsds, protein_ca_atoms
+from StrucTools import binder_binds_all_targets, binder_rmsds, parse_desired_residues, protein_ca_atoms
 
 MODELS = ("of3", "native_af3", "esmfold2")
 REQUIRED_COLUMNS = ("design_name", "seq_binder", "seq_target")
@@ -22,6 +22,8 @@ SCORE_COLUMNS = ("iptm", "ipsae_min", "binder_plddt", "binder_plddt70_fraction",
 CONFIDENT_PLDDT = 70   # "confident" residue, the usual AlphaFold cutoff
 POSE_PREFIX = "rmsd_pose_target_"   # one column per target chain: rmsd_pose_target_B, ...
 CONSISTENCY_COLUMNS = ("paratope_recall", "paratope_jaccard", "epitope_recall", "epitope_jaccard")
+HOTSPOT_COLUMNS = ("hotspot_epitope_recall", "hotspot_paratope_recall")   # only present when the matching yaml list is set
+REFERENCE_INDEX_COLUMN = r"ref_(paratope|epitope)_indices_[A-Z]$"
 SEGMENTS_COLUMN = r"identical_segments_target_([A-Z])"   # optional per-design column, e.g. "1-130,136-265"
 
 
@@ -35,7 +37,7 @@ def load_designs(source) -> pd.DataFrame:
         raise ValueError(f"designs CSV is missing required column(s): {missing}")
 
     # A refiner top_designs.csv carries its own interface and structure; treat them as the reference.
-    if not any(re.match(r"ref_(paratope|epitope)_indices_[A-Z]$", c) for c in df.columns):
+    if not any(re.match(REFERENCE_INDEX_COLUMN, c) for c in df.columns):
         df = df.rename(columns={c: f"ref_{c}" for c in df.columns if re.match(r"(paratope|epitope)_indices_[A-Z]$", c)})
     if "path_structure_ref" not in df.columns and "path_structure" in df.columns:
         df = df.assign(path_structure_ref=df.path_structure)
@@ -216,7 +218,12 @@ def interface_consistency(ref: dict, pred: dict, seq_target: str, segments: dict
 
 
 def add_interface_consistency(tall: pd.DataFrame, designs: pd.DataFrame) -> pd.DataFrame:
-    """Append consistency columns (reference = each design's `ref_*` columns); empty for designs without one."""
+    """
+    Append consistency columns (reference = each design's `ref_*` columns); empty for designs without one. When no
+    design has a reference interface at all, nothing is added (columns that could only be blank would just confuse).
+    """
+    if not any(re.match(REFERENCE_INDEX_COLUMN, c) for c in designs.columns):
+        return tall
     by_design = designs.set_index("design_name")
     rows = []
     for row in tall.to_dict(orient="records"):
@@ -235,6 +242,81 @@ def add_contact_check(tall: pd.DataFrame, designs: pd.DataFrame, epitope_residue
     passed = [binder_binds_all_targets(row, num_targets[row["design_name"]], epitope_residues, paratope_residues)
               for row in tall.to_dict(orient="records")]
     return tall.assign(contact_check_passed=passed)
+
+
+def _predicted_positions(row: dict, prefix: str, chains) -> set:
+    """Positions in `<prefix>_<chain>` index strings of one job's metrics, over `chains`; a missing value counts as none."""
+    return {int(pos) for chain in chains for pos in str(row.get(f"{prefix}_{chain}", "")).split(",") if pos.strip().isdigit()}
+
+
+def add_hotspot_recall(tall: pd.DataFrame, designs: pd.DataFrame, epitope_residues: str = "", paratope_residues: str = "") -> pd.DataFrame:
+    """
+    How many of the desired residues the prediction keeps in contact, per job, as a fraction of the desired residues.
+    `hotspot_epitope_recall`: desired epitope residues (<target chain><position>) found in the predicted epitope,
+    pooled over the design's target chains. `hotspot_paratope_recall`: desired paratope residues found in the
+    predicted paratope, taken over all target chains together (a binder-wide list is not met per chain). A column is
+    only added when its list is not empty. Like the contact check, computed from the stored indices here rather than
+    in the jobs, so it needs no GPU time.
+    """
+    desired_epitope = parse_desired_residues(epitope_residues)
+    desired_paratope = set().union(*parse_desired_residues(paratope_residues).values())
+    num_targets = designs.set_index("design_name").seq_target.str.count(",") + 1
+    epitope_recall, paratope_recall = [], []
+    for row in tall.to_dict(orient="records"):
+        chains = [chr(ord("B") + i) for i in range(num_targets[row["design_name"]])]
+        wanted = {(c, p) for c in chains for p in desired_epitope.get(c, ())}
+        found = {(c, p) for c in chains for p in _predicted_positions(row, "epitope_indices", c)}
+        epitope_recall.append(len(wanted & found) / len(wanted) if wanted else np.nan)
+        paratope_recall.append(len(desired_paratope & _predicted_positions(row, "paratope_indices", chains)) / len(desired_paratope)
+                               if desired_paratope else np.nan)
+    if desired_epitope:
+        tall = tall.assign(hotspot_epitope_recall=epitope_recall)
+    if desired_paratope:
+        tall = tall.assign(hotspot_paratope_recall=paratope_recall)
+    return tall
+
+
+def drop_coverage_columns(tall: pd.DataFrame) -> pd.DataFrame:
+    """
+    Remove `epitope_coverage_*` (recall/precision/f1 per target chain from determine_binding_interface). The
+    validation jobs never receive the desired residues, so these are always 0 here; `hotspot_epitope_recall`
+    replaces them.
+    """
+    return tall.drop(columns=[c for c in tall.columns if c.startswith("epitope_coverage_")])
+
+
+def check_hotspots(designs: pd.DataFrame, epitope_residues: str = "", paratope_residues: str = "") -> None:
+    """
+    Refuses malformed desired residues before anything runs: every entry must be <chain letter><position>, an
+    epitope entry must name one of the design's target chains (B, C, ...), a paratope entry the binder (A), and the
+    position must lie inside that chain's sequence. All problems are reported at once, with the designs they affect.
+    """
+    problems = {}   # message -> designs it applies to
+    for name, text in (("epitope_residues", epitope_residues), ("paratope_residues", paratope_residues)):
+        if not isinstance(text, str):
+            raise ValueError(f"{name} must be a comma-separated string such as \"B73,B74\", got {text!r}")
+        for item in (x.strip() for x in text.split(",") if x.strip()):
+            if not re.fullmatch(r"[A-Z][0-9]+", item):
+                problems.setdefault(f"{name}: {item!r} must look like <chain letter><position>, e.g. "
+                                    f"{'B73' if name == 'epitope_residues' else 'A10'}", [])
+                continue
+            chain, position = item[0], int(item[1:])
+            for design in designs.itertuples():
+                if name == "paratope_residues":
+                    chains = {"A": design.seq_binder}
+                else:
+                    chains = {chr(ord("B") + i): seq for i, seq in enumerate(design.seq_target.split(","))}
+                if chain not in chains:
+                    problems.setdefault(f"{name}: {item!r} names chain {chain}, but this design's "
+                                        f"{'binder is chain A' if name == 'paratope_residues' else 'target chains are ' + ','.join(chains)}", []).append(design.design_name)
+                elif not 1 <= position <= len(chains[chain]):
+                    problems.setdefault(f"{name}: {item!r} is outside the {len(chains[chain])}-residue chain {chain}", []).append(design.design_name)
+    if problems:
+        lines = []
+        for message, names in problems.items():
+            shown = ", ".join(names[:3]) + (f" and {len(names) - 3} more" if len(names) > 3 else "")
+            lines.append(message + (f" (designs: {shown})" if names else ""))
+        raise ValueError("invalid desired residues:\n  " + "\n  ".join(lines))
 
 
 def _best_rmsds(ref_ca, ref_chains: list, pred_ca, seq_binder: str, seq_target: str, segments: dict = None) -> dict:
@@ -350,7 +432,7 @@ def summarize(tall: pd.DataFrame, designs: pd.DataFrame) -> pd.DataFrame:
     for (design, model), group in tall.groupby(["design_name", "model"], sort=False):
         out = {"design_name": design, "model": model, "n_seeds": len(group)}
         pose_columns = sorted(c for c in group if c.startswith(POSE_PREFIX))
-        for column in [*SCORE_COLUMNS, *pose_columns]:
+        for column in [*SCORE_COLUMNS, *HOTSPOT_COLUMNS, *pose_columns]:
             if column in group:
                 out |= {f"{column}_mean": group[column].mean(), f"{column}_min": group[column].min(),
                         f"{column}_max": group[column].max()}

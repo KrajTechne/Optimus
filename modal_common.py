@@ -433,7 +433,9 @@ def execute_validation(designs, models, seeds, num_samples: int, output_dir: str
                       f"{type(exc).__name__}: {exc}")
             scored = len(rows)
         if rows:
-            tall = vc.add_contact_check(pd.DataFrame(rows), designs, epitope_residues, paratope_residues)
+            tall = vc.drop_coverage_columns(pd.DataFrame(rows))
+            tall = vc.add_contact_check(tall, designs, epitope_residues, paratope_residues)
+            tall = vc.add_hotspot_recall(tall, designs, epitope_residues, paratope_residues)
             tall = vc.add_interface_consistency(tall, designs)
             tall.to_csv(os.path.join(out_dir, "validation_results.csv"), index=False)
             vc.summarize(tall, designs).to_csv(os.path.join(out_dir, "validation_summary.csv"), index=False)

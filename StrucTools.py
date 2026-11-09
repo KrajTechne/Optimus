@@ -363,6 +363,16 @@ def interface_positions(atoms, binder_chain: str, target_chain: str, cutoff: flo
     return paratope.tolist(), epitope.tolist()
 
 
+def parse_desired_residues(residues: str) -> dict:
+    """'B73,B74,A10' -> {'B': {73, 74}, 'A': {10}}: desired residues as <chain letter><1-indexed position>, by chain."""
+    parsed = {}
+    for item in residues.split(","):
+        item = item.strip()
+        if item:
+            parsed.setdefault(item[0], set()).add(int(item[1:]))
+    return parsed
+
+
 def binder_binds_contacts(metrics: dict, target_chain: str, epitope_residues: str = "", paratope_residues: str = "") -> bool:
     """
     Pass/fail contact rule for one target chain, read from the indices determine_binding_interface() stored in
@@ -370,8 +380,8 @@ def binder_binds_contacts(metrics: dict, target_chain: str, epitope_residues: st
     epitope, and at least 2 of the desired paratope residues (e.g. "A10,A11") in the actual paratope.
     A side with no desired residues is not checked.
     """
-    desired_paratope = {int(x[1:]) for x in paratope_residues.split(",") if x.strip()}
-    desired_epitope = {int(x[1:]) for x in epitope_residues.split(",") if x.strip() and x[0] == target_chain}
+    desired_paratope = set().union(*parse_desired_residues(paratope_residues).values())
+    desired_epitope = parse_desired_residues(epitope_residues).get(target_chain, set())
     actual_paratope = {int(x) for x in metrics[f"paratope_indices_{target_chain}"].split(",") if x.strip()}
     actual_epitope = {int(x) for x in metrics[f"epitope_indices_{target_chain}"].split(",") if x.strip()}
 

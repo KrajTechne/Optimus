@@ -89,7 +89,8 @@ def validate_designs(config: str = "", input: str = "", models: str = DEFAULTS["
 
     # Everything that can be checked without a GPU is checked here, before anything is started.
     designs = vc.load_designs(settings["input"])
-    jobs = vc.expand_jobs(designs, models, seeds, settings["num_samples"], settings["max_jobs"])
+    vc.check_hotspots(designs, settings["epitope_residues"], settings["paratope_residues"])
+    jobs =vc.expand_jobs(designs, models, seeds, settings["num_samples"], settings["max_jobs"])
     # Reference structures on this machine go to the volume; the driver reads them from there.
     designs, uploads = vc.plan_reference_uploads(designs, output_dir, OUTPUTS_MOUNT)
     if uploads:

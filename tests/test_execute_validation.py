@@ -52,10 +52,12 @@ def test_results_summary_and_failures_are_written(run):
     assert len(tall) == 3 and set(tall.iptm) == {0.8}                    # best sample by iptm
     assert "chain_ids" in tall and tall.contact_check_passed.all()   # short list-valued metrics are kept
     assert tall.path_job.str.contains("of3_seed").all() and (tall.paratope_recall == 1).all()
+    assert (tall.hotspot_paratope_recall == 1).all() and "hotspot_epitope_recall" not in tall   # only paratope_residues was given
     failures = pd.read_csv(out / "failures.csv")
     assert failures.design_name.tolist() == ["bad"] and "out of memory" in failures.error[0]
     summary = pd.read_csv(out / "validation_summary.csv")
     assert summary.set_index("design_name").n_seeds.to_dict() == {"good": 2, "bad": 1}
+    assert (summary.hotspot_paratope_recall_mean == 1).all()
 
 
 def test_job_folder_is_passed_to_the_runner(run, tmp_path):
